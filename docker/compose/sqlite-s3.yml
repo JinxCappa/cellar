@@ -1,0 +1,189 @@
+# Docker Compose configuration: SQLite + MinIO (S3) storage
+# This configuration tests the SQLite metadata backend with S3-compatible storage
+
+name: cellar-sqlite-s3
+
+services:
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: cellar-minio
+    hostname: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      cellar-net:
+        aliases:
+          - minio
+          - cellar-minio
+
+  # MinIO bucket initialization (waits for MinIO to be ready)
+  minio-init:
+    image: minio/mc:latest
+    container_name: cellar-minio-init
+    depends_on:
+      - minio
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for MinIO to be ready..."
+        # Wait for MinIO to be reachable (mc will retry internally)
+        until mc alias set local http://minio:9000 minioadmin minioadmin123 2>/dev/null; do
+          echo "MinIO not ready, waiting..."
+          sleep 2
+        done
+        echo "MinIO is ready"
+
+        # Create bucket
+        mc mb local/cellar --ignore-existing
+
+        # Set anonymous download for NAR files
+        mc anonymous set download local/cellar/nar
+
+        # Verify bucket exists
+        mc ls local/cellar && echo "MinIO bucket initialized successfully" || exit 1
+
+        # Signal readiness by creating a marker file
+        touch /tmp/init-complete
+
+        # Stay alive to prevent --abort-on-container-exit from stopping the stack
+        echo "Init complete, waiting for stack shutdown..."
+        tail -f /dev/null
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/init-complete"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 0s
+    networks:
+      - cellar-net
+
+  # Cellar server
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    container_name: cellar-server
+    depends_on:
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER__BIND: "0.0.0.0:8080"
+      CELLAR_METADATA__TYPE: sqlite
+      CELLAR_METADATA__PATH: /var/lib/cellar/data/metadata.db
+      CELLAR_STORAGE__TYPE: s3
+      CELLAR_STORAGE__BUCKET: cellar
+      CELLAR_STORAGE__ENDPOINT: http://minio:9000
+      CELLAR_STORAGE__REGION: us-east-1
+      CELLAR_STORAGE__PREFIX: cache
+      # MinIO credentials via AWS SDK env vars
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+      AWS_ALLOW_HTTP: "true"
+      CELLAR_SIGNING__KEY_NAME: "test-cache-1"
+      CELLAR_SIGNING__PRIVATE_KEY__TYPE: generate
+      RUST_LOG: info,cellar=debug
+    volumes:
+      - ../config/server.sqlite-s3.toml:/etc/cellar/server.toml:ro
+      - server-data:/var/lib/cellar/data
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks:
+      - cellar-net
+
+  # Builder container - builds and pushes packages
+  builder:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.nix
+      target: builder
+    container_name: cellar-builder
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_TOKEN: "${CELLAR_TEST_TOKEN:-}"
+    volumes:
+      - nix-store:/nix
+      - builder-workspace:/workspace
+    networks:
+      - cellar-net
+    stdin_open: true
+    tty: true
+
+  # Client container - pulls packages from cache
+  client:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.nix
+      target: client
+    container_name: cellar-client
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_PUBLIC_KEY: "${CELLAR_PUBLIC_KEY:-}"
+    volumes:
+      - nix-store-client:/nix
+      - client-workspace:/workspace
+    networks:
+      - cellar-net
+    stdin_open: true
+    tty: true
+
+  # Test runner / orchestrator
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: docker/tests/runner/Dockerfile
+    container_name: cellar-test-runner
+    depends_on:
+      server:
+        condition: service_healthy
+      builder:
+        condition: service_started
+      client:
+        condition: service_started
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_CONFIG: sqlite-s3
+      TEST_SCENARIOS: "${TEST_SCENARIOS:-all}"
+      # Pass MinIO credentials for S3 verification tests
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+      MINIO_ENDPOINT: http://minio:9000
+    volumes:
+      - ../tests:/tests:ro
+      - test-results:/results
+    networks:
+      - cellar-net
+
+volumes:
+  minio-data:
+  server-data:
+  nix-store:
+  nix-store-client:
+  builder-workspace:
+  client-workspace:
+  test-results:
+
+networks:
+  cellar-net:
+    driver: bridge

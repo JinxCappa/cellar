@@ -1,0 +1,62 @@
+# Dockerignore for Cellar
+# Excludes files that shouldn't be included in Docker build context
+
+# Build artifacts
+target/
+*.rs.bk
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Test artifacts
+*.log
+coverage/
+test-results/
+
+# Local configuration
+.env
+.env.local
+*.local.toml
+
+# Keys and secrets (don't include in image!)
+*.sec
+*.pem
+*.key
+keys/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker compose files (only needed at runtime)
+docker/compose/
+
+# Test results volume
+docker/tests/results/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Cargo cache (use Docker layer caching instead)
+.cargo/
+
+# Nix
+result
+result-*
+.direnv/

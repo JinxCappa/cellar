@@ -1,0 +1,34 @@
+# Dev server configuration - SQLite + Filesystem
+
+[server]
+bind = "0.0.0.0:8080"
+default_chunk_size = 16777216
+max_chunk_size = 33554432
+upload_timeout_secs = 3600
+enable_tracing = true
+require_expected_chunks = false
+
+[storage]
+type = "filesystem"
+path = "/var/lib/cellar/storage"
+
+[metadata]
+type = "sqlite"
+path = "/var/lib/cellar/data/metadata.db"
+
+[signing]
+key_name = "dev-cache-1"
+[signing.private_key]
+type = "value"
+key = "dev-cache-1:Hasc/Ix/zbENSbrGVw9GGxsLwXCI5LkgY/SZytD9EkpZqTI9qTtI6VLML/Pwwa64S897AFYqt5KKuu536oLkXQ=="
+
+[gc]
+grace_period_secs = 300
+
+[rate_limit]
+enabled = false
+
+[admin]
+# Token: cellar-test-token-12345
+token_hash = "sha256:ae5f64a9e014cd97eaed037b5e52bd3e7a2daae9ba2b0d2db5e83a5a298e13ad"
+token_scopes = ["cache:admin", "cache:write", "cache:read"]

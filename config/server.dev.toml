@@ -1,0 +1,32 @@
+# Development Configuration for Nix Binary Cache vNext
+# Uses ephemeral signing key and filesystem storage
+
+[server]
+bind = "127.0.0.1:8080"
+max_parallel_chunks = 8
+default_chunk_size = 16777216
+max_chunk_size = 33554432
+upload_timeout_secs = 3600  # 1 hour for development
+enable_tracing = true
+
+[storage]
+type = "filesystem"
+path = "./data/storage"
+
+[metadata]
+type = "sqlite"
+path = "./data/metadata.db"
+
+[signing]
+key_name = "dev-cache-1"
+
+[signing.private_key]
+# Generate ephemeral key for development
+type = "generate"
+
+[gc]
+grace_period_secs = 60  # Short grace period for development
+batch_size = 100
+
+[rate_limit]
+enabled = false

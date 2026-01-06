@@ -1,0 +1,27 @@
+name: Rust setup (toolchain + cache)
+description: Install Rust toolchain/components and configure Cargo build cache
+
+inputs:
+  toolchain:
+    description: Rust toolchain (e.g., stable, 1.76.0, nightly)
+    required: false
+    default: stable
+  components:
+    description: Space-separated Rust components (e.g., "clippy rustfmt")
+    required: false
+    default: ""
+  cache-suffix:
+    description: Unique suffix to avoid cache collisions between jobs
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-suffix }}

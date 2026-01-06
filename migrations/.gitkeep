@@ -1,0 +1,3 @@
+# Placeholder for database migrations
+# Migrations are currently embedded in the SQLite implementation.
+# External migration files will be added when PostgreSQL support is implemented.

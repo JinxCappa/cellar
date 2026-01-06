@@ -1,0 +1,47 @@
+# Rust build artifacts
+/target
+debug/
+*.pdb
+
+# Rust backup files
+*.rs.bk
+**/*.rs.bk
+
+# Ignore all dot-directories
+.*/
+
+# Dependency files
+*.d
+
+# Cargo
+!.cargo/config.toml
+
+# Github
+!.github/
+
+# General build/dev
+/result
+/.direnv
+/.idea
+/.vscode
+*.swp
+*.tmp
+*.log
+.DS_Store
+.env
+
+# Data directories
+/data/
+/docs/
+
+# Key files (secrets)
+*.sec
+*.pem
+*.key
+
+# Environment files
+.env.local
+.env.*.local
+
+# OS files
+Thumbs.db

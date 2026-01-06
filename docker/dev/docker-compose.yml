@@ -1,0 +1,57 @@
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/dev/Dockerfile
+      target: server
+    volumes:
+      - ./server.toml:/etc/cellar/server.toml:ro
+      - server-data:/var/lib/cellar/data
+      - server-storage:/var/lib/cellar/storage
+    ports:
+      - "8080:8080"
+    networks:
+      - cellar-dev
+
+  init:
+    build:
+      context: ../..
+      dockerfile: docker/dev/Dockerfile
+      target: client
+    volumes:
+      - ./init-cache.sh:/usr/local/bin/init-cache.sh:ro
+    environment:
+      - CELLAR_SERVER=http://server:8080
+      - CELLAR_TOKEN=cellar-test-token-12345
+    entrypoint: ["bash", "/usr/local/bin/init-cache.sh"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - cellar-dev
+
+  client:
+    build:
+      context: ../..
+      dockerfile: docker/dev/Dockerfile
+      target: client
+    volumes:
+      - ./flake:/workspace/flake
+      - nix-store:/nix
+    environment:
+      - CELLAR_SERVER=http://server:8080
+      - CELLAR_TOKEN=cellar-test-token-12345
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    networks:
+      - cellar-dev
+
+volumes:
+  server-data:
+  server-storage:
+  nix-store:
+
+networks:
+  cellar-dev:
+    driver: bridge

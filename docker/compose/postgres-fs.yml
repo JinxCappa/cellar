@@ -1,0 +1,138 @@
+# Docker Compose configuration: PostgreSQL + Filesystem storage
+# This configuration tests the PostgreSQL metadata backend with local filesystem storage
+
+name: cellar-postgres-fs
+
+services:
+  # PostgreSQL database for metadata
+  postgres:
+    image: postgres:16-alpine
+    container_name: cellar-postgres
+    environment:
+      POSTGRES_USER: cellar
+      POSTGRES_PASSWORD: cellar_test_password
+      POSTGRES_DB: cellar
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../init/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cellar -d cellar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cellar-net
+
+  # Cellar server
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    container_name: cellar-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER__BIND: "0.0.0.0:8080"
+      CELLAR_METADATA__TYPE: postgres
+      CELLAR_METADATA__URL: "postgres://cellar:cellar_test_password@postgres:5432/cellar"
+      CELLAR_STORAGE__TYPE: filesystem
+      CELLAR_STORAGE__PATH: /var/lib/cellar/storage
+      CELLAR_SIGNING__KEY_NAME: "test-cache-1"
+      CELLAR_SIGNING__PRIVATE_KEY__TYPE: generate
+      RUST_LOG: info,cellar=debug
+    volumes:
+      - ../config/server.postgres-fs.toml:/etc/cellar/server.toml:ro
+      - server-storage:/var/lib/cellar/storage
+      - server-data:/var/lib/cellar/data
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks:
+      - cellar-net
+
+  # Builder container - builds and pushes packages
+  builder:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.nix
+      target: builder
+    container_name: cellar-builder
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_TOKEN: "${CELLAR_TEST_TOKEN:-}"
+    volumes:
+      - nix-store:/nix
+      - builder-workspace:/workspace
+    networks:
+      - cellar-net
+    stdin_open: true
+    tty: true
+
+  # Client container - pulls packages from cache
+  client:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.nix
+      target: client
+    container_name: cellar-client
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_PUBLIC_KEY: "${CELLAR_PUBLIC_KEY:-}"
+    volumes:
+      - nix-store-client:/nix
+      - client-workspace:/workspace
+    networks:
+      - cellar-net
+    stdin_open: true
+    tty: true
+
+  # Test runner / orchestrator
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: docker/tests/runner/Dockerfile
+    container_name: cellar-test-runner
+    depends_on:
+      server:
+        condition: service_healthy
+      builder:
+        condition: service_started
+      client:
+        condition: service_started
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_CONFIG: postgres-fs
+      TEST_SCENARIOS: "${TEST_SCENARIOS:-all}"
+    volumes:
+      - ../tests:/tests:ro
+      - test-results:/results
+    networks:
+      - cellar-net
+
+volumes:
+  postgres-data:
+  server-storage:
+  server-data:
+  nix-store:
+  nix-store-client:
+  builder-workspace:
+  client-workspace:
+  test-results:
+
+networks:
+  cellar-net:
+    driver: bridge

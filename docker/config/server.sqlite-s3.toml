@@ -1,0 +1,59 @@
+# Cellar Server Configuration - SQLite + S3 (MinIO)
+# Used for Docker integration testing
+
+[server]
+# Bind to all interfaces for container networking
+bind = "0.0.0.0:8080"
+# Maximum parallel chunk uploads per session
+max_parallel_chunks = 8
+# Default chunk size (16 MiB)
+default_chunk_size = 16777216
+# Maximum chunk size (32 MiB)
+max_chunk_size = 33554432
+# Upload session timeout in seconds (1 hour for testing)
+upload_timeout_secs = 3600
+# Enable request tracing
+enable_tracing = true
+# Disable expected_chunks requirement for test scripts (legacy compatibility)
+require_expected_chunks = false
+
+[storage]
+# S3-compatible storage backend (MinIO)
+type = "s3"
+bucket = "cellar"
+# Endpoint is overridden by environment variable
+endpoint = "http://minio:9000"
+region = "us-east-1" # Optional; falls back to AWS env/IMDS, then defaults to us-east-1
+prefix = "cache"
+# MinIO requires path-style URLs (bucket in path, not subdomain)
+force_path_style = true
+
+[metadata]
+# SQLite metadata backend
+type = "sqlite"
+path = "/var/lib/cellar/data/metadata.db"
+
+[signing]
+# Key name (appears in narinfo signatures)
+key_name = "test-cache-1"
+
+[signing.private_key]
+# Generate ephemeral key for testing
+type = "generate"
+
+[gc]
+# Short grace period for testing (5 minutes)
+grace_period_secs = 300
+# Batch size for GC operations
+batch_size = 100
+
+[rate_limit]
+# Disable rate limiting for testing
+enabled = false
+
+[admin]
+# Pre-configured test token for integration tests
+# Token value: cellar-test-token-12345
+token_hash = "sha256:ae5f64a9e014cd97eaed037b5e52bd3e7a2daae9ba2b0d2db5e83a5a298e13ad"
+token_scopes = ["cache:admin", "cache:write", "cache:read"]
+token_description = "Docker integration test token"

@@ -1,0 +1,75 @@
+# Cellar Client Configuration
+#
+# This file configures the cellar CLI for pushing to and pulling from caches.
+# Default location: ~/.config/cellar/client.toml
+# Override with: --client-config <path> or CELLAR_CLIENT_CONFIG env var
+#
+# Quick start:
+#   cellarctl login my-cache --url https://cache.example.com --token <token>
+#
+# This will create/update this config file automatically.
+#
+# Environment variables:
+#   CELLAR_CLIENT_CONFIG  - Path to this config file (overrides default location)
+#   CELLAR_SERVER         - Server URL (use with CELLAR_TOKEN to skip config file)
+#   CELLAR_TOKEN          - Auth token (must be paired with CELLAR_SERVER)
+#   CELLAR_SIGNING_KEY    - Secret signing key (for `cellarctl key public --env`)
+#
+# Config fields can also be set/overridden via CELLAR_-prefixed env vars.
+# Use double underscores (__) to separate nested keys:
+#   CELLAR_DEFAULT_CACHE=prod
+#   CELLAR_CACHES__PROD__URL=https://cache.example.com
+#   CELLAR_CACHES__PROD__TOKEN=cellar_xxxxx
+
+# Default cache alias to use when --cache is not specified
+default_cache = "my-cache"
+
+# Cache profiles - each defines a connection to a cellar server
+# The key (e.g., "my-cache") is the alias used with --cache flag
+
+[caches.my-cache]
+# Server URL (required)
+url = "https://cache.example.com"
+
+# Authentication token (required for push, optional for public cache read)
+# Get a token from your cache administrator or generate one with:
+#   cellar token create --scopes cache:read,cache:write
+token = "cellar_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Cache UUID - automatically populated by `cellar login`
+# cache_id = "550e8400-e29b-41d4-a716-446655440000"
+
+# Cache name - automatically populated by `cellar login`
+# cache_name = "my-cache"
+
+# Public base URL for substituter config - automatically populated
+# public_base_url = "https://cache.example.com"
+
+# Signing public key for signature verification - automatically populated
+# public_key = "cache.example.com-1:Base64EncodedPublicKey=="
+
+
+# Example: Multiple cache profiles
+# You can configure multiple caches and switch between them
+
+# [caches.work]
+# url = "https://work-cache.example.com"
+# token = "cellar_work_token_here"
+
+# [caches.personal]
+# url = "https://personal-cache.example.com"
+# token = "cellar_personal_token_here"
+
+# Usage examples:
+#
+#   # Push to default cache
+#   cellar push ./result
+#
+#   # Push to specific cache
+#   cellar push --cache work ./result
+#
+#   # Switch default cache
+#   cellar use personal
+#
+#   # Configure nix.conf to use a cache as substituter
+#   cellar use my-cache --update-nix-conf

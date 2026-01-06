@@ -1,0 +1,55 @@
+[package]
+name = "cellar-server"
+version.workspace = true
+description = "HTTP API server for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cellar-core = { workspace = true }
+cellar-storage = { workspace = true }
+cellar-metadata = { workspace = true }
+cellar-signer = { workspace = true }
+clap = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+figment = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+governor = { workspace = true }
+dashmap = "6"
+ipnet = "2"
+async-compression = { workspace = true }
+tokio-util = { workspace = true }
+prometheus = { workspace = true }
+
+[[bin]]
+name = "cellard"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+axum-test = { workspace = true }
+reqwest = { workspace = true }
+nix-base32 = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+sqlx = { workspace = true }

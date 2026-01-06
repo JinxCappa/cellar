@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/metadata",
+    "crates/signer",
+    "crates/server",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.6"
+edition = "2024"
+rust-version = "1.92"
+license = "AGPL-3.0-only"
+repository = "https://github.com/jinxcappa/cellar"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+hyper = { version = "1" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+toml = { version = "0.9" }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "migrate", "uuid", "time"] }
+
+# AWS SDK for S3
+aws-config = { version = "1" }
+aws-sdk-s3 = { version = "1" }
+aws-credential-types = { version = "1" }
+aws-smithy-http-client = { version = "1" }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+sha2 = { version = "0.10" }
+base64 = { version = "0.22" }
+nix-base32 = { version = "0.2" }
+rand = { version = "0.9" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+bytes = { version = "1" }
+futures = { version = "0.3" }
+async-trait = { version = "0.1" }
+async-stream = { version = "0.3" }
+pin-project-lite = { version = "0.2" }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Configuration
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Testing
+tempfile = { version = "3" }
+tokio-test = { version = "0.4" }
+testcontainers = { version = "0.26" }
+testcontainers-modules = { version = "0.14", features = ["postgres"] }
+
+# Rate limiting & compression (added for gap implementation)
+governor = { version = "0.10" }
+async-compression = { version = "0.4", features = ["tokio", "zstd", "xz"] }
+
+# Metrics
+prometheus = { version = "0.14" }
+
+# HTTP client for testing
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+axum-test = { version = "18" }
+
+# Internal crates
+cellar-core = { path = "crates/core" }
+cellar-storage = { path = "crates/storage" }
+cellar-metadata = { path = "crates/metadata" }
+cellar-signer = { path = "crates/signer" }
+cellar-server = { path = "crates/server" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

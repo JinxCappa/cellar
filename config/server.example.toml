@@ -1,0 +1,106 @@
+# Cellar Server Configuration
+
+[server]
+# Bind address
+bind = "127.0.0.1:8080"
+# Maximum parallel chunk uploads per session
+max_parallel_chunks = 8
+# Default chunk size (16 MiB)
+default_chunk_size = 16777216
+# Maximum chunk size (32 MiB)
+max_chunk_size = 33554432
+# Upload session timeout in seconds (24 hours)
+upload_timeout_secs = 86400
+# Enable request tracing
+enable_tracing = true
+
+[storage]
+# Storage backend type: "filesystem" or "s3"
+type = "filesystem"
+# Path for filesystem storage
+path = "./data/storage"
+
+# Uncomment for S3 storage:
+# [storage]
+# type = "s3"
+# bucket = "cellar"
+# endpoint = "http://localhost:9000"  # For MinIO or S3-compatible services
+# region = "us-east-1"  # Optional; falls back to AWS env/IMDS, then defaults to us-east-1
+# prefix = "cache"
+# force_path_style = true  # Required for MinIO and most S3-compatible services
+# Optional: Explicit AWS credentials (overrides env vars)
+# WARNING: Prefer env vars or IAM roles for production deployments.
+# access_key_id = "AKIAIOSFODNN7EXAMPLE"
+# secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+[metadata]
+# Metadata store type: "sqlite" or "postgres"
+type = "sqlite"
+# Path for SQLite database
+path = "./data/metadata.db"
+
+# Admin token (REQUIRED). Generate hash with: echo -n "your-secret-token" | sha256sum
+[admin]
+token_hash = "sha256:YOUR_TOKEN_HASH_HERE"
+# token_scopes = ["cache:admin"]  # Default: cache:admin
+# token_description = "Admin token"
+
+# Uncomment for PostgreSQL (URL mode - legacy):
+# [metadata]
+# type = "postgres"
+# url = "postgres://user:password@localhost/cellar"
+# max_connections = 10
+# statement_timeout_ms = 300000  # 5 minutes
+
+# Uncomment for PostgreSQL (individual fields - recommended for production):
+# [metadata]
+# type = "postgres"
+# host = "db.example.com"
+# port = 5432  # default
+# database = "cellar"
+# username = "cellar"
+# password = "secret"  # NOT recommended - use env var instead: CELLAR_METADATA__PASSWORD
+# ssl_mode = "require"  # Options: disable, prefer (default), require
+# max_connections = 10
+# statement_timeout_ms = 300000  # 5 minutes
+
+[signing]
+# Key name (appears in narinfo signatures)
+key_name = "cache.example.com-1"
+
+[signing.private_key]
+# Key source: "file", "env", or "generate"
+type = "file"
+path = "./data/cache-key.sec"
+
+# Uncomment to use environment variable:
+# [signing.private_key]
+# type = "env"
+# var = "CELLAR_SIGNING_KEY"
+
+# Or provide key directly (NOT recommended for production):
+# [signing.private_key]
+# type = "value"
+# key = "keyname:base64..."
+
+# Uncomment to generate ephemeral key (development only):
+# [signing.private_key]
+# type = "generate"
+
+
+
+[gc]
+# Grace period before deleting unreferenced chunks (1 hour)
+grace_period_secs = 3600
+# Batch size for GC operations
+batch_size = 1000
+
+[rate_limit]
+# Enable rate limiting
+enabled = false
+# Requests per minute per IP (for unauthenticated requests)
+ip_requests_per_minute = 6000
+# Requests per minute per token (for authenticated requests)
+token_requests_per_minute = 60000
+# Burst size (allows temporary burst above rate limit)
+burst_size = 200

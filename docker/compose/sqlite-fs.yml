@@ -1,0 +1,64 @@
+# Docker Compose configuration: SQLite + Filesystem (CLI testing)
+# Minimal configuration for testing cellarctl push/pull functionality
+
+name: cellar-cli-test
+
+services:
+  # Cellar server with minimal SQLite + Filesystem setup
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    container_name: cellar-server
+    environment:
+      CELLAR_SERVER__BIND: "0.0.0.0:8080"
+      CELLAR_METADATA__TYPE: sqlite
+      CELLAR_METADATA__PATH: /var/lib/cellar/data/metadata.db
+      CELLAR_STORAGE__TYPE: filesystem
+      CELLAR_STORAGE__PATH: /var/lib/cellar/storage
+      CELLAR_SIGNING__KEY_NAME: "test-cache-1"
+      CELLAR_SIGNING__PRIVATE_KEY__TYPE: generate
+      RUST_LOG: info,cellar=debug
+    volumes:
+      - ../config/server.sqlite-fs.toml:/etc/cellar/server.toml:ro
+      - server-data:/var/lib/cellar/data
+      - server-storage:/var/lib/cellar/storage
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks:
+      - cellar-net
+
+  # CLI test runner - Nix environment with cellarctl
+  cli-test:
+    build:
+      context: ../..
+      dockerfile: docker/tests/cli/Dockerfile
+    container_name: cellar-cli-test
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      CELLAR_SERVER_URL: http://server:8080
+      CELLAR_TEST_TOKEN: cellar-test-token-12345
+      TEST_SCENARIOS: "${TEST_SCENARIOS:-all}"
+    volumes:
+      - nix-store:/nix
+      - test-results:/results
+    networks:
+      - cellar-net
+
+volumes:
+  server-data:
+  server-storage:
+  nix-store:
+  test-results:
+
+networks:
+  cellar-net:
+    driver: bridge
