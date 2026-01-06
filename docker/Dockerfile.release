@@ -1,0 +1,24 @@
+# Minimal release Dockerfile using Google's distroless base image
+# Benefits: ~2MB base, no shell/package manager, reduced attack surface
+# Runs as nonroot user (UID 65532) by default
+#
+# For debugging, build with: --build-arg VARIANT=debug-nonroot
+
+ARG VARIANT=nonroot
+FROM gcr.io/distroless/static-debian13:${VARIANT}
+
+LABEL org.opencontainers.image.title="Cellar" \
+      org.opencontainers.image.description="High-performance Nix binary cache server" \
+      org.opencontainers.image.vendor="Cellar" \
+      org.opencontainers.image.licenses="AGPL-3.0"
+
+ARG TARGETARCH
+
+COPY dist/cellard-${TARGETARCH} /cellard
+COPY dist/cellarctl-${TARGETARCH} /cellarctl
+
+ENV CELLAR_CONFIG=/etc/cellar/server.toml
+
+EXPOSE 8080
+
+ENTRYPOINT ["/cellard"]

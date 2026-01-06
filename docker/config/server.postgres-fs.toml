@@ -1,0 +1,56 @@
+# Cellar Server Configuration - PostgreSQL + Filesystem
+# Used for Docker integration testing
+
+[server]
+# Bind to all interfaces for container networking
+bind = "0.0.0.0:8080"
+# Maximum parallel chunk uploads per session
+max_parallel_chunks = 8
+# Default chunk size (16 MiB)
+default_chunk_size = 16777216
+# Maximum chunk size (32 MiB)
+max_chunk_size = 33554432
+# Upload session timeout in seconds (1 hour for testing)
+upload_timeout_secs = 3600
+# Enable request tracing
+enable_tracing = true
+# Disable expected_chunks requirement for test scripts (legacy compatibility)
+require_expected_chunks = false
+
+[storage]
+# Filesystem storage backend
+type = "filesystem"
+path = "/var/lib/cellar/storage"
+
+[metadata]
+# PostgreSQL metadata backend
+type = "postgres"
+# URL is overridden by environment variable CELLAR_METADATA__URL
+url = "postgres://cellar:cellar_test_password@postgres:5432/cellar"
+max_connections = 10
+
+[signing]
+# Key name (appears in narinfo signatures)
+key_name = "test-cache-1"
+
+[signing.private_key]
+# Generate ephemeral key for testing
+# In production, use "file" or "env"
+type = "generate"
+
+[gc]
+# Short grace period for testing (5 minutes)
+grace_period_secs = 300
+# Batch size for GC operations
+batch_size = 100
+
+[rate_limit]
+# Disable rate limiting for testing
+enabled = false
+
+[admin]
+# Pre-configured test token for integration tests
+# Token value: cellar-test-token-12345
+token_hash = "sha256:ae5f64a9e014cd97eaed037b5e52bd3e7a2daae9ba2b0d2db5e83a5a298e13ad"
+token_scopes = ["cache:admin", "cache:write", "cache:read"]
+token_description = "Docker integration test token"

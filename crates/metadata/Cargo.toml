@@ -1,0 +1,25 @@
+[package]
+name = "cellar-metadata"
+version.workspace = true
+description = "Metadata store abstraction and implementations for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cellar-core = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }

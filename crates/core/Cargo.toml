@@ -1,0 +1,21 @@
+[package]
+name = "cellar-core"
+version.workspace = true
+description = "Domain types and shared logic for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+nix-base32 = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

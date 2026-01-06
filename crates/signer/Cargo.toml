@@ -1,0 +1,18 @@
+[package]
+name = "cellar-signer"
+version.workspace = true
+description = "Narinfo generation and signing for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cellar-core = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand_core = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
