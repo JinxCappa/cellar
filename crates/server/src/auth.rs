@@ -1,0 +1,185 @@
+//! Authentication and authorization middleware.
+
+use crate::error::{ApiError, ApiResult};
+use crate::ratelimit::TokenIdExtension;
+use crate::state::AppState;
+use axum::extract::{Request, State};
+use axum::http::header::AUTHORIZATION;
+use axum::middleware::Next;
+use axum::response::Response;
+use cellar_core::token::{Token, TokenScope};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+/// Trace ID for request correlation.
+#[derive(Clone, Debug)]
+pub struct TraceId(pub String);
+
+impl TraceId {
+    /// Generate a new random trace ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    /// Get the trace ID as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for TraceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for TraceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Authenticated request extension.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedUser {
+    /// The validated token.
+    pub token: Token,
+}
+
+impl AuthenticatedUser {
+    /// Check if the user has a specific scope.
+    pub fn has_scope(&self, scope: TokenScope) -> bool {
+        self.token.has_scope(scope)
+    }
+
+    /// Require a specific scope, returning an error if not present.
+    pub fn require_scope(&self, scope: TokenScope) -> ApiResult<()> {
+        if self.has_scope(scope) {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden(format!(
+                "missing required scope: {}",
+                scope
+            )))
+        }
+    }
+}
+
+/// Extract bearer token from Authorization header.
+fn extract_bearer_token(req: &Request) -> Option<&str> {
+    req.headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+/// Extract trace ID from X-Trace-Id header or generate a new one.
+fn extract_or_generate_trace_id(req: &Request) -> TraceId {
+    req.headers()
+        .get("x-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| TraceId(s.to_string()))
+        .unwrap_or_else(TraceId::new)
+}
+
+/// Hash a token for storage lookup.
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
+/// Authentication middleware that validates tokens and sets up trace context.
+pub async fn auth_middleware(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    // Extract or generate trace ID
+    let trace_id = extract_or_generate_trace_id(&req);
+    let trace_id_str = trace_id.0.clone();
+
+    // Store trace ID in request extensions
+    req.extensions_mut().insert(trace_id);
+
+    // Extract token from header
+    let token_str = extract_bearer_token(&req);
+
+    if let Some(token_str) = token_str {
+        let token_hash = hash_token(token_str);
+
+        // Look up token in metadata store
+        if let Some(token_row) = state.metadata.get_token_by_hash(&token_hash).await? {
+            // Parse scopes from JSON
+            let scopes: Vec<String> = serde_json::from_str(&token_row.scopes)
+                .map_err(|e| ApiError::Internal(format!("invalid token scopes: {e}")))?;
+
+            let scopes: HashSet<TokenScope> = scopes
+                .iter()
+                .filter_map(|s| TokenScope::parse(s).ok())
+                .collect();
+
+            let token = Token {
+                id: cellar_core::token::TokenId::parse(&token_row.token_id.to_string())?,
+                cache_id: token_row.cache_id,
+                scopes,
+                expires_at: token_row.expires_at,
+                revoked_at: token_row.revoked_at,
+                created_at: token_row.created_at,
+                description: token_row.description,
+            };
+
+            // Check if token is valid
+            if !token.is_valid() {
+                return Err(ApiError::Unauthorized("token expired or revoked".to_string()));
+            }
+
+            // Update last used time (fire and forget)
+            let metadata = state.metadata.clone();
+            let token_id = token_row.token_id;
+            tokio::spawn(async move {
+                let _ = metadata.touch_token(token_id, OffsetDateTime::now_utc()).await;
+            });
+
+            // Add authenticated user to request extensions
+            req.extensions_mut().insert(AuthenticatedUser { token });
+
+            // Add token ID extension for rate limiting
+            req.extensions_mut()
+                .insert(TokenIdExtension(token_row.token_id.to_string()));
+        }
+    }
+
+    // Run the request within a tracing span that includes the trace ID
+    let response = tracing::info_span!("request", trace_id = %trace_id_str)
+        .in_scope(|| next.run(req));
+
+    Ok(response.await)
+}
+
+/// Require authentication (token must be present).
+pub fn require_auth(req: &Request) -> ApiResult<&AuthenticatedUser> {
+    req.extensions()
+        .get::<AuthenticatedUser>()
+        .ok_or_else(|| ApiError::Unauthorized("authentication required".to_string()))
+}
+
+/// Get optional authentication.
+pub fn get_auth(req: &Request) -> Option<&AuthenticatedUser> {
+    req.extensions().get::<AuthenticatedUser>()
+}
+
+/// Get the trace ID from request extensions.
+pub fn get_trace_id(req: &Request) -> Option<&TraceId> {
+    req.extensions().get::<TraceId>()
+}
+
+// Note: hex is a simple utility, we'll inline it
+mod hex {
+    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}

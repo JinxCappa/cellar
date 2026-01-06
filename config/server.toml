@@ -1,0 +1,73 @@
+# Cellar Server Configuration
+
+[server]
+# Bind address
+bind = "127.0.0.1:8080"
+# Maximum parallel chunk uploads per session
+max_parallel_chunks = 8
+# Default chunk size (16 MiB)
+default_chunk_size = 16777216
+# Maximum chunk size (32 MiB)
+max_chunk_size = 33554432
+# Upload session timeout in seconds (24 hours)
+upload_timeout_secs = 86400
+# Enable request tracing
+enable_tracing = true
+
+[storage]
+# Storage backend type: "filesystem" or "s3"
+type = "filesystem"
+# Path for filesystem storage
+path = "./data/storage"
+
+# Uncomment for S3 storage:
+# [storage]
+# type = "s3"
+# bucket = "cellar"
+# endpoint = "http://localhost:9000"  # For MinIO
+# region = "us-east-1"
+# prefix = "cache"
+
+[metadata]
+# Metadata store type: "sqlite" or "postgres"
+type = "sqlite"
+# Path for SQLite database
+path = "./data/metadata.db"
+
+# Uncomment for PostgreSQL:
+# [metadata]
+# type = "postgres"
+# url = "postgres://user:password@localhost/cellar"
+# max_connections = 10
+
+[signing]
+# Key name (appears in narinfo signatures)
+key_name = "cache.example.com-1"
+
+[signing.private_key]
+# Key source: "file", "env", or "generate"
+type = "file"
+path = "./data/cache-key.sec"
+
+# Uncomment to use environment variable:
+# [signing.private_key]
+# type = "env"
+# var = "CELLAR_SIGNING_KEY"
+
+# Uncomment to generate ephemeral key (development only):
+# [signing.private_key]
+# type = "generate"
+
+[gc]
+# Grace period before deleting unreferenced chunks (1 hour)
+grace_period_secs = 3600
+# Batch size for GC operations
+batch_size = 1000
+
+[rate_limit]
+# Enable rate limiting
+enabled = false
+# Requests per second per IP
+requests_per_second = 100
+# Burst size
+burst_size = 200

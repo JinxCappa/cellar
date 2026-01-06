@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/metadata",
+    "crates/signer",
+    "crates/server",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/example/cellar"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+hyper = { version = "1" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "migrate", "uuid", "time"] }
+
+# Object storage
+object_store = { version = "0.11", features = ["aws", "http"] }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+sha2 = { version = "0.10" }
+base64 = { version = "0.22" }
+nix-base32 = { version = "0.1" }
+rand = { version = "0.8" }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde"] }
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+bytes = { version = "1" }
+futures = { version = "0.3" }
+async-trait = { version = "0.1" }
+async-stream = { version = "0.3" }
+pin-project-lite = { version = "0.2" }
+
+# Configuration
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Testing
+tempfile = { version = "3" }
+tokio-test = { version = "0.4" }
+testcontainers = { version = "0.23" }
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+
+# Rate limiting & compression (added for gap implementation)
+governor = { version = "0.8" }
+async-compression = { version = "0.4", features = ["tokio", "zstd", "xz"] }
+
+# Metrics
+prometheus = { version = "0.13" }
+lazy_static = { version = "1.4" }
+
+# HTTP client for testing
+reqwest = { version = "0.12", features = ["json"] }
+axum-test = { version = "16" }
+
+# Internal crates
+cellar-core = { path = "crates/core" }
+cellar-storage = { path = "crates/storage" }
+cellar-metadata = { path = "crates/metadata" }
+cellar-signer = { path = "crates/signer" }
+cellar-server = { path = "crates/server" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,34 @@
+[package]
+name = "cellar-cli"
+version = "0.1.0"
+description = "Administrative CLI for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cellar-core = { workspace = true }
+cellar-storage = { workspace = true }
+cellar-metadata = { workspace = true }
+cellar-signer = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+figment = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+
+[[bin]]
+name = "cellarctl"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }

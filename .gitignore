@@ -1,0 +1,27 @@
+/target
+/result
+/.direnv
+/.idea
+/.vscode
+*.swp
+*.tmp
+*.log
+*.rs.bk
+.DS_Store
+.env
+
+# Data directories
+/data/
+/docs/
+
+# Key files (secrets)
+*.sec
+*.pem
+*.key
+
+# Environment files
+.env.local
+.env.*.local
+
+# OS files
+Thumbs.db

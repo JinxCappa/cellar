@@ -1,0 +1,25 @@
+[package]
+name = "cellar-storage"
+version = "0.1.0"
+description = "Object storage abstraction and backends for Cellar"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cellar-core = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+pin-project-lite = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
