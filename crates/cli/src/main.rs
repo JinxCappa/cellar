@@ -437,11 +437,14 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
                                     }
                                 }
 
-                                // Delete manifest from storage
+                                // Delete manifest from storage. NotFound is OK (already gone).
                                 if let Some(key) = &manifest.object_key {
-                                    if let Err(e) = storage.delete(key).await {
-                                        eprintln!("Failed to delete manifest {} from storage: {e}", manifest.manifest_hash);
-                                        stats.errors += 1;
+                                    match storage.delete(key).await {
+                                        Ok(()) | Err(StorageError::NotFound(_)) => {}
+                                        Err(e) => {
+                                            eprintln!("Failed to delete manifest {} from storage: {e}", manifest.manifest_hash);
+                                            stats.errors += 1;
+                                        }
                                     }
                                 }
 
