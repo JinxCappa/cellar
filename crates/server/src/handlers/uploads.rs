@@ -110,51 +110,69 @@ pub async fn create_upload(
             state.metadata.delete_session(existing.upload_id).await?;
             // Fall through to create a new session
         } else {
-            // Session is still valid - verify ownership before allowing resume
-            verify_session_ownership(&auth, &existing)?;
-            // For resume: check expected chunks (if defined) or received chunks
-            let expected = state.metadata.get_expected_chunks(existing.upload_id).await?;
+            // Session is still valid - verify parameters match before allowing resume.
+            // If parameters changed, the client is starting a new upload for the same
+            // store path, so we should invalidate the old session.
+            let params_match = existing.nar_hash == body.nar_hash
+                && existing.nar_size == body.nar_size as i64
+                && existing.chunk_size == chunk_size as i64
+                && existing.manifest_hash == body.manifest_hash;
 
-            let missing_chunks = if !expected.is_empty() {
-                // Expected chunks were defined - return actual missing list
-                let missing = state.metadata.get_missing_chunks(existing.upload_id).await?;
-                if missing.is_empty() {
-                    MissingChunks::List(vec![]) // All chunks received
-                } else {
-                    MissingChunks::List(missing)
-                }
+            if !params_match {
+                tracing::info!(
+                    upload_id = %existing.upload_id,
+                    trace_id = %trace_id,
+                    "Session parameters changed, invalidating old session"
+                );
+                state.metadata.delete_session(existing.upload_id).await?;
+                // Fall through to create a new session
             } else {
-                // No expected chunks defined - check received chunks
-                let received = state.metadata.get_received_chunks(existing.upload_id).await?;
-                if received.is_empty() {
-                    MissingChunks::All("all".to_string())
-                } else {
-                    // Some progress made but we can't compute missing chunks without
-                    // a pre-defined expected list. Return `Unknown` to signal to the client
-                    // that it should GET /v1/uploads/{id} to see the received_chunks list
-                    // and determine what remains to be uploaded.
-                    MissingChunks::Unknown {
-                        received_count: received.len(),
+                // Parameters match - verify ownership before allowing resume
+                verify_session_ownership(&auth, &existing)?;
+                // For resume: check expected chunks (if defined) or received chunks
+                let expected = state.metadata.get_expected_chunks(existing.upload_id).await?;
+
+                let missing_chunks = if !expected.is_empty() {
+                    // Expected chunks were defined - return actual missing list
+                    let missing = state.metadata.get_missing_chunks(existing.upload_id).await?;
+                    if missing.is_empty() {
+                        MissingChunks::List(vec![]) // All chunks received
+                    } else {
+                        MissingChunks::List(missing)
                     }
-                }
-            };
+                } else {
+                    // No expected chunks defined - check received chunks
+                    let received = state.metadata.get_received_chunks(existing.upload_id).await?;
+                    if received.is_empty() {
+                        MissingChunks::All("all".to_string())
+                    } else {
+                        // Some progress made but we can't compute missing chunks without
+                        // a pre-defined expected list. Return `Unknown` to signal to the client
+                        // that it should GET /v1/uploads/{id} to see the received_chunks list
+                        // and determine what remains to be uploaded.
+                        MissingChunks::Unknown {
+                            received_count: received.len(),
+                        }
+                    }
+                };
 
-            // Record metrics and log for resumed session
-            UPLOAD_SESSIONS_RESUMED.inc();
-            tracing::info!(
-                upload_id = %existing.upload_id,
-                trace_id = %trace_id,
-                "Resumed existing upload session"
-            );
+                // Record metrics and log for resumed session
+                UPLOAD_SESSIONS_RESUMED.inc();
+                tracing::info!(
+                    upload_id = %existing.upload_id,
+                    trace_id = %trace_id,
+                    "Resumed existing upload session"
+                );
 
-            return Ok((
-                StatusCode::OK,
-                Json(CreateUploadResponse {
-                    upload_id: existing.upload_id.to_string(),
-                    missing_chunks,
-                    max_parallel_chunks: state.config.server.max_parallel_chunks,
-                }),
-            ));
+                return Ok((
+                    StatusCode::OK,
+                    Json(CreateUploadResponse {
+                        upload_id: existing.upload_id.to_string(),
+                        missing_chunks,
+                        max_parallel_chunks: state.config.server.max_parallel_chunks,
+                    }),
+                ));
+            }
         }
     }
 
@@ -481,6 +499,8 @@ pub struct CommitRequest {
 struct CommitArtifacts {
     /// Compressed NAR storage key (if created).
     compressed_nar_key: Option<String>,
+    /// Temporary NAR key used during streaming compression.
+    temp_nar_key: Option<String>,
     /// Narinfo storage key (if created).
     narinfo_key: Option<String>,
     /// Store path hash (if store path record was created/updated).
@@ -495,6 +515,7 @@ impl CommitArtifacts {
     fn new() -> Self {
         Self {
             compressed_nar_key: None,
+            temp_nar_key: None,
             narinfo_key: None,
             store_path_hash: None,
             cache_id: None,
@@ -518,6 +539,19 @@ impl CommitArtifacts {
             }
         }
 
+        // Delete temporary NAR key if streaming compression was in progress
+        if let Some(key) = &self.temp_nar_key {
+            if let Err(e) = state.storage.delete(key).await {
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    key = %key,
+                    error = %e,
+                    trace_id = %trace_id,
+                    "Failed to clean up temp NAR key after commit failure"
+                );
+            }
+        }
+
         // Delete narinfo if it was stored
         if let Some(key) = &self.narinfo_key {
             if let Err(e) = state.storage.delete(key).await {
@@ -531,12 +565,24 @@ impl CommitArtifacts {
             }
         }
 
-        // Mark store path as failed if it was created (and not a re-upload)
-        // For re-uploads, we don't want to break the existing visible path
+        // Handle store path visibility on failure.
         // Require both store_path_hash AND cache_id to be Some to avoid updating
         // unintended rows where cache_id IS NULL
         if let (Some(hash), Some(cache_id)) = (&self.store_path_hash, self.cache_id) {
-            if !self.is_reupload {
+            if self.is_reupload {
+                // For reuploads: revert from "pending_reupload" back to "visible".
+                // This ensures the original content remains accessible.
+                if let Err(e) = state.metadata.update_visibility(Some(cache_id), hash, "visible").await {
+                    tracing::warn!(
+                        upload_id = %upload_id,
+                        store_path_hash = %hash,
+                        error = %e,
+                        trace_id = %trace_id,
+                        "Failed to revert store path to visible after reupload failure"
+                    );
+                }
+            } else {
+                // For new uploads: mark as failed
                 if let Err(e) = state.metadata.update_visibility(Some(cache_id), hash, "failed").await {
                     tracing::warn!(
                         upload_id = %upload_id,
@@ -626,9 +672,25 @@ pub async fn commit_upload(
     let compression_config = state.config.server.compression;
     let needs_compression = compression_config != cellar_core::config::CompressionConfig::None;
 
-    // Create streaming compressor if compression is enabled
-    let mut compressor = if needs_compression {
-        Some(crate::compression::StreamingCompressor::new(compression_config))
+    // Check if expected_chunks were pre-defined for this upload.
+    // If they were, we can distinguish between server errors (chunk unexpectedly missing)
+    // and client errors (manifest references unknown chunk).
+    let has_expected_chunks = !state.metadata.get_expected_chunks(upload_id).await?.is_empty();
+
+    // Create true streaming compressor if compression is enabled.
+    // This compresses data and streams it directly to storage, avoiding memory pressure.
+    let temp_nar_key = format!("tmp/nar/{}", upload_id);
+    let mut streaming_compressor = if needs_compression {
+        let upload = state
+            .storage
+            .put_stream(&temp_nar_key)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to create streaming upload: {e}")))?;
+        Some(crate::compression::TrueStreamingCompressor::new(
+            upload,
+            compression_config,
+            temp_nar_key.clone(),
+        ))
     } else {
         None
     };
@@ -640,7 +702,19 @@ pub async fn commit_upload(
             .get_chunk(&chunk_hash.to_hex())
             .await?
             .ok_or_else(|| {
-                ApiError::Internal(format!("chunk {} not found in metadata", chunk_hash.to_hex()))
+                if has_expected_chunks {
+                    // Server knew what to expect but chunk is missing - internal error
+                    ApiError::Internal(format!(
+                        "chunk {} unexpectedly missing from metadata",
+                        chunk_hash.to_hex()
+                    ))
+                } else {
+                    // Client provided manifest with unknown chunk - client error
+                    ApiError::BadRequest(format!(
+                        "manifest references unknown chunk: {}",
+                        chunk_hash.to_hex()
+                    ))
+                }
             })?;
 
         let object_key = chunk_info.object_key.ok_or_else(|| {
@@ -653,7 +727,7 @@ pub async fn commit_upload(
         nar_hasher.update(&chunk_data);
 
         // Stream chunk through compressor if compression is enabled
-        if let Some(ref mut comp) = compressor {
+        if let Some(ref mut comp) = streaming_compressor {
             comp.write_chunk(&chunk_data)
                 .await
                 .map_err(|e| ApiError::Internal(format!("compression failed: {e}")))?;
@@ -710,32 +784,35 @@ pub async fn commit_upload(
     let now = OffsetDateTime::now_utc();
     let store_path = StorePath::parse(&session.store_path)?;
 
-    // Create manifest if it doesn't exist
-    if !state.metadata.manifest_exists(&manifest_hash.to_hex()).await? {
-        let manifest_row = ManifestRow {
+    // Create manifest using atomic INSERT ON CONFLICT DO NOTHING.
+    // This eliminates the TOCTOU race condition from the previous check-then-insert pattern.
+    let manifest_row = ManifestRow {
+        manifest_hash: manifest_hash.to_hex(),
+        chunk_size: session.chunk_size,
+        chunk_count: chunk_hashes.len() as i32,
+        nar_size: session.nar_size,
+        object_key: Some(manifest_hash.to_object_key()),
+        created_at: now,
+    };
+
+    let chunk_mappings: Vec<ManifestChunkRow> = chunk_hashes
+        .iter()
+        .enumerate()
+        .map(|(i, hash)| ManifestChunkRow {
             manifest_hash: manifest_hash.to_hex(),
-            chunk_size: session.chunk_size,
-            chunk_count: chunk_hashes.len() as i32,
-            nar_size: session.nar_size,
-            object_key: Some(manifest_hash.to_object_key()),
-            created_at: now,
-        };
+            position: i as i32,
+            chunk_hash: hash.to_hex(),
+        })
+        .collect();
 
-        let chunk_mappings: Vec<ManifestChunkRow> = chunk_hashes
-            .iter()
-            .enumerate()
-            .map(|(i, hash)| ManifestChunkRow {
-                manifest_hash: manifest_hash.to_hex(),
-                position: i as i32,
-                chunk_hash: hash.to_hex(),
-            })
-            .collect();
+    let manifest_created = state
+        .metadata
+        .create_manifest(&manifest_row, &chunk_mappings)
+        .await?;
 
-        state
-            .metadata
-            .create_manifest(&manifest_row, &chunk_mappings)
-            .await?;
-
+    // Only increment refcounts and store manifest JSON if we created it.
+    // If the manifest already existed, these operations were already done.
+    if manifest_created {
         // Increment refcounts for all chunks
         for hash in &chunk_hashes {
             state.metadata.increment_refcount(&hash.to_hex()).await?;
@@ -751,8 +828,9 @@ pub async fn commit_upload(
     }
 
     // Check for existing visible store path to handle re-uploads correctly.
-    // For re-uploads of already visible paths, we keep them visible throughout
-    // (no flash to pending) to avoid interrupting clients downloading the path.
+    // For re-uploads, we use "pending_reupload" state during the commit process,
+    // which allows us to atomically update only after all writes succeed.
+    // The original visible path remains served until we flip to the new content.
     let existing = state
         .metadata
         .get_store_path(session.cache_id, store_path.hash().as_str())
@@ -763,8 +841,10 @@ pub async fn commit_upload(
         .map(|sp| sp.visibility_state == "visible")
         .unwrap_or(false);
 
-    // For re-uploads of visible paths, skip the pending state entirely
-    let initial_visibility = if is_reupload { "visible" } else { "pending" };
+    // Use "pending_reupload" for reuploads to avoid exposing inconsistent state.
+    // The original visible content continues to be served until we complete the commit.
+    // On failure, cleanup will revert to "visible" (the original state).
+    let initial_visibility = if is_reupload { "pending_reupload" } else { "pending" };
 
     // Preserve original created_at for re-uploads
     let created_at = existing.as_ref().map(|e| e.created_at).unwrap_or(now);
@@ -807,22 +887,38 @@ pub async fn commit_upload(
 
     // Generate and sign narinfo
     let nar_hash = NarHash::from_sri(&session.nar_hash)?;
-    let mut narinfo = if let Some(comp) = compressor {
-        // Finalize streaming compression
-        let compressed = match comp.finish().await {
-            Ok(c) => c,
+    let mut narinfo = if let Some(comp) = streaming_compressor {
+        // Track temp key for cleanup in case of failure
+        artifacts.temp_nar_key = Some(temp_nar_key.clone());
+
+        // Finalize streaming compression (data is already in temp storage key)
+        let compression_result = match comp.finish().await {
+            Ok(r) => r,
             Err(e) => {
                 artifacts.cleanup(&state, upload_id, &trace_id.0).await;
                 return Err(ApiError::Internal(format!("compression finalization failed: {e}")));
             }
         };
 
-        // Store compressed NAR
+        // Copy from temp key to final content-addressed key
         let compression = compression_config.to_compression();
         let extension = compression.extension();
         let nar_key = format!("nar/{}.nar{}", store_path.hash(), extension);
-        try_with_cleanup!(state.storage.put(&nar_key, compressed.data).await);
+        try_with_cleanup!(state.storage.copy(&temp_nar_key, &nar_key).await);
         artifacts.compressed_nar_key = Some(nar_key);
+
+        // Delete temp key now that copy succeeded
+        if let Err(e) = state.storage.delete(&temp_nar_key).await {
+            tracing::warn!(
+                upload_id = %upload_id,
+                key = %temp_nar_key,
+                error = %e,
+                trace_id = %trace_id,
+                "Failed to delete temp NAR key after successful copy"
+            );
+        }
+        // Clear temp key from artifacts since we've handled it
+        artifacts.temp_nar_key = None;
 
         // Create narinfo for compressed NAR
         cellar_core::narinfo::NarInfo::new_compressed(
@@ -830,8 +926,8 @@ pub async fn commit_upload(
             nar_hash,
             session.nar_size as u64,
             compression,
-            compressed.file_hash,
-            compressed.file_size,
+            compression_result.file_hash,
+            compression_result.file_size,
         )
     } else {
         // No compression - use uncompressed narinfo
