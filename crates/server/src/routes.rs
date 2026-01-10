@@ -41,7 +41,9 @@ pub fn create_router(state: AppState) -> Router {
         // Narinfo routes use a fallback handler since axum doesn't support /{param}.suffix
         .fallback(handlers::narinfo_fallback);
 
-    // Metrics endpoint (no auth required for Prometheus scraping)
+    // Metrics endpoint (no auth required for Prometheus scraping).
+    // SECURITY: This endpoint MUST be network-restricted to Prometheus IPs only.
+    // See crate::metrics module documentation for details.
     let metrics_routes = Router::new().route("/metrics", get(metrics_handler));
 
     // Extract rate limit state for the middleware

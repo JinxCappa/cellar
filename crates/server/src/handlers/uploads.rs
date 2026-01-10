@@ -258,7 +258,15 @@ pub async fn create_upload(
 
 /// Verify the requesting token owns the upload session.
 fn verify_session_ownership(auth: &AuthenticatedUser, session: &UploadSessionRow) -> ApiResult<()> {
-    // If session has an owner, verify the requesting token matches
+    // Verify the session belongs to the same cache as the token.
+    // This prevents cross-cache access when owner_token_id is NULL (legacy/manual rows).
+    if session.cache_id != auth.token.cache_id {
+        return Err(ApiError::Forbidden(
+            "upload session belongs to a different cache".to_string(),
+        ));
+    }
+
+    // If session has an owner token, verify the requesting token matches
     if let Some(owner_id) = session.owner_token_id {
         if *auth.token.id.as_uuid() != owner_id {
             return Err(ApiError::Forbidden(
@@ -490,11 +498,10 @@ pub async fn upload_chunk(
         "Chunk uploaded"
     );
 
-    Ok(if was_new {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    })
+    // Always return OK to prevent cross-cache dedup side-channel.
+    // Returning CREATED vs OK would leak whether a chunk exists globally,
+    // allowing tenants to probe for chunk presence across caches.
+    Ok(StatusCode::OK)
 }
 
 /// Commit request body.

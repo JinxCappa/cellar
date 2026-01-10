@@ -1,6 +1,17 @@
 //! Prometheus metrics for the Cellar server.
 //!
 //! Exposes metrics for upload operations, chunk deduplication, and request latency.
+//!
+//! # Security Note
+//!
+//! The `/metrics` endpoint is unauthenticated to allow Prometheus scraping.
+//! While metrics don't contain tenant-specific data (no cache IDs, paths, or hashes),
+//! they do expose aggregate system usage (total chunks, bytes, active sessions).
+//!
+//! **Deployment Requirement**: The `/metrics` endpoint MUST be network-restricted
+//! to authorized Prometheus scraper IPs only. This should be enforced at the
+//! infrastructure level (firewall, load balancer, or reverse proxy rules).
+//! Do NOT expose `/metrics` on public networks.
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
