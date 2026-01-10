@@ -444,6 +444,10 @@ mod sqlite_impl {
             manifest: &ManifestRow,
             chunks: &[ManifestChunkRow],
         ) -> MetadataResult<bool> {
+            // Use a transaction to ensure atomicity: both the manifest and all its
+            // chunk mappings are inserted together, or neither is.
+            let mut tx = self.pool.begin().await?;
+
             // Use INSERT OR IGNORE to handle concurrent creates atomically.
             // This eliminates the TOCTOU race condition from check-then-insert.
             let result = sqlx::query(
@@ -458,11 +462,12 @@ mod sqlite_impl {
             .bind(manifest.nar_size)
             .bind(&manifest.object_key)
             .bind(manifest.created_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
             // If no rows were affected, the manifest already exists
             if result.rows_affected() == 0 {
+                tx.rollback().await?;
                 return Ok(false);
             }
 
@@ -474,10 +479,11 @@ mod sqlite_impl {
                 .bind(&chunk.manifest_hash)
                 .bind(chunk.position)
                 .bind(&chunk.chunk_hash)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
+            tx.commit().await?;
             Ok(true)
         }
 
