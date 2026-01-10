@@ -423,8 +423,21 @@ impl ChunkRepo for PostgresStore {
         older_than: OffsetDateTime,
         limit: u32,
     ) -> MetadataResult<Vec<ChunkRow>> {
+        // Exclude chunks that are part of open upload sessions to prevent
+        // GC from deleting chunks for in-progress uploads (which temporarily have refcount=0).
         let rows = sqlx::query_as::<_, ChunkRow>(
-            "SELECT * FROM chunks WHERE refcount = 0 AND created_at < $1 ORDER BY created_at LIMIT $2",
+            r#"
+            SELECT * FROM chunks
+            WHERE refcount = 0
+              AND created_at < $1
+              AND chunk_hash NOT IN (
+                SELECT uec.chunk_hash FROM upload_expected_chunks uec
+                INNER JOIN upload_sessions us ON uec.upload_id = us.upload_id
+                WHERE us.state = 'open'
+              )
+            ORDER BY created_at
+            LIMIT $2
+            "#,
         )
         .bind(older_than)
         .bind(limit as i64)

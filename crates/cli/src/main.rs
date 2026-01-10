@@ -195,8 +195,16 @@ async fn handle_token_command(command: TokenCommands, config: &AppConfig) -> Res
                 .collect();
 
             let now = OffsetDateTime::now_utc();
-            let expires_at =
-                expires_in.map(|secs| now + time::Duration::seconds(secs as i64));
+            let expires_at = match expires_in {
+                Some(secs) => {
+                    let secs_i64: i64 = secs.try_into().context(format!(
+                        "expires_in too large: {secs} exceeds maximum of {}",
+                        i64::MAX
+                    ))?;
+                    Some(now + time::Duration::seconds(secs_i64))
+                }
+                None => None,
+            };
 
             let scopes_vec: Vec<String> = scopes.split(',').map(|s| s.trim().to_string()).collect();
             let token_id = Uuid::new_v4();
@@ -286,11 +294,17 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
     match command {
         GcCommands::Run { job_type } => {
             use cellar_metadata::models::GcJobRow;
-            use cellar_metadata::repos::gc::{GcJobState, GcJobType};
+            use cellar_metadata::repos::gc::{GcJobState, GcJobType, GcStats};
+            use cellar_storage::error::StorageError;
             use time::OffsetDateTime;
             use uuid::Uuid;
 
-            let job_type = match job_type.as_str() {
+            // Initialize storage for chunk/manifest GC
+            let storage = cellar_storage::from_config(&config.storage)
+                .await
+                .context("failed to initialize storage")?;
+
+            let job_type_enum = match job_type.as_str() {
                 "upload_gc" => GcJobType::UploadGc,
                 "chunk_gc" => GcJobType::ChunkGc,
                 "manifest_gc" => GcJobType::ManifestGc,
@@ -303,7 +317,7 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
             let job = GcJobRow {
                 gc_job_id: job_id,
                 cache_id: None,
-                job_type: job_type.as_str().to_string(),
+                job_type: job_type_enum.as_str().to_string(),
                 state: GcJobState::Running.as_str().to_string(),
                 started_at: Some(now),
                 finished_at: None,
@@ -312,11 +326,166 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
 
             metadata.create_gc_job(&job).await?;
             println!("Started GC job: {job_id}");
-            println!("Job type: {}", job_type.as_str());
+            println!("Job type: {}", job_type_enum.as_str());
 
-            // Note: Actual GC logic would run here
-            // For CLI, we'd need to implement the actual GC operations
-            println!("\nGC job submitted. Use 'cellarctl gc status {job_id}' to check progress.");
+            // Run the actual GC
+            let mut stats = GcStats::default();
+            const MAX_GC_ITERATIONS: u32 = 10000;
+
+            let result: Result<()> = async {
+                match job_type_enum {
+                    GcJobType::UploadGc => {
+                        // Clean up expired upload sessions
+                        let mut iterations = 0;
+                        loop {
+                            iterations += 1;
+                            if iterations > MAX_GC_ITERATIONS {
+                                println!("Warning: GC exceeded max iterations, stopping");
+                                break;
+                            }
+
+                            let expired = metadata.get_expired_sessions(config.gc.batch_size).await?;
+                            if expired.is_empty() {
+                                break;
+                            }
+
+                            for session in expired {
+                                stats.items_processed += 1;
+                                if let Err(e) = metadata.delete_session(session.upload_id).await {
+                                    eprintln!("Failed to delete session {}: {e}", session.upload_id);
+                                    stats.errors += 1;
+                                } else {
+                                    stats.items_deleted += 1;
+                                }
+                            }
+                        }
+                    }
+                    GcJobType::ChunkGc => {
+                        // Clean up unreferenced chunks
+                        let grace_time = OffsetDateTime::now_utc() - config.gc.grace_period();
+                        let mut iterations = 0;
+
+                        loop {
+                            iterations += 1;
+                            if iterations > MAX_GC_ITERATIONS {
+                                println!("Warning: GC exceeded max iterations, stopping");
+                                break;
+                            }
+
+                            let unreferenced = metadata
+                                .get_unreferenced_chunks(grace_time, config.gc.batch_size)
+                                .await?;
+                            if unreferenced.is_empty() {
+                                break;
+                            }
+
+                            for chunk in unreferenced {
+                                stats.items_processed += 1;
+                                let key = format!(
+                                    "chunks/{}/{}/{}",
+                                    &chunk.chunk_hash[..2],
+                                    &chunk.chunk_hash[2..4],
+                                    chunk.chunk_hash
+                                );
+
+                                // Delete from storage. NotFound is OK (already gone).
+                                let storage_ok = match storage.delete(&key).await {
+                                    Ok(()) => true,
+                                    Err(StorageError::NotFound(_)) => true,
+                                    Err(e) => {
+                                        eprintln!("Failed to delete chunk {} from storage: {e}", chunk.chunk_hash);
+                                        stats.errors += 1;
+                                        false
+                                    }
+                                };
+
+                                // Always delete from metadata to prevent permanent orphaned rows
+                                if let Err(e) = metadata.delete_chunk(&chunk.chunk_hash).await {
+                                    eprintln!("Failed to delete chunk {} from metadata: {e}", chunk.chunk_hash);
+                                    stats.errors += 1;
+                                } else if storage_ok {
+                                    stats.items_deleted += 1;
+                                    stats.bytes_reclaimed += chunk.size_bytes as u64;
+                                }
+                            }
+                        }
+                    }
+                    GcJobType::ManifestGc => {
+                        // Clean up orphaned manifests
+                        let mut iterations = 0;
+                        loop {
+                            iterations += 1;
+                            if iterations > MAX_GC_ITERATIONS {
+                                println!("Warning: GC exceeded max iterations, stopping");
+                                break;
+                            }
+
+                            let orphaned = metadata.get_orphaned_manifests(config.gc.batch_size).await?;
+                            if orphaned.is_empty() {
+                                break;
+                            }
+
+                            for manifest in orphaned {
+                                stats.items_processed += 1;
+
+                                // Get chunks to decrement refcounts
+                                let chunks = metadata.get_manifest_chunks(&manifest.manifest_hash).await?;
+                                for chunk_hash in chunks {
+                                    if let Err(e) = metadata.decrement_refcount(&chunk_hash).await {
+                                        eprintln!("Failed to decrement refcount for {chunk_hash}: {e}");
+                                    }
+                                }
+
+                                // Delete manifest from storage
+                                if let Some(key) = &manifest.object_key {
+                                    if let Err(e) = storage.delete(key).await {
+                                        eprintln!("Failed to delete manifest {} from storage: {e}", manifest.manifest_hash);
+                                    }
+                                }
+
+                                // Delete from metadata
+                                if let Err(e) = metadata.delete_manifest(&manifest.manifest_hash).await {
+                                    eprintln!("Failed to delete manifest {} from metadata: {e}", manifest.manifest_hash);
+                                    stats.errors += 1;
+                                } else {
+                                    stats.items_deleted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            .await;
+
+            // Update job state
+            let final_state = if result.is_ok() && stats.errors == 0 {
+                GcJobState::Finished
+            } else {
+                GcJobState::Failed
+            };
+
+            let stats_json = serde_json::to_string(&stats).ok();
+            metadata
+                .update_gc_job_state(
+                    job_id,
+                    final_state.as_str(),
+                    Some(OffsetDateTime::now_utc()),
+                    stats_json.as_deref(),
+                )
+                .await?;
+
+            println!("\nGC job completed.");
+            println!("  Items processed: {}", stats.items_processed);
+            println!("  Items deleted: {}", stats.items_deleted);
+            println!("  Bytes reclaimed: {}", stats.bytes_reclaimed);
+            if stats.errors > 0 {
+                println!("  Errors: {}", stats.errors);
+            }
+
+            if let Err(e) = result {
+                anyhow::bail!("GC job failed: {e}");
+            }
         }
         GcCommands::Status { job_id } => {
             use uuid::Uuid;
