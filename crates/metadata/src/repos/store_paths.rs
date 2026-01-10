@@ -35,6 +35,17 @@ pub trait StorePathRepo: Send + Sync {
         visibility: &str,
     ) -> MetadataResult<()>;
 
+    /// Complete reupload by atomically updating visibility to 'visible' and new metadata.
+    /// Used when transitioning from 'pending_reupload' to 'visible' with new nar_hash/size/manifest.
+    async fn complete_reupload(
+        &self,
+        cache_id: Option<Uuid>,
+        store_path_hash: &str,
+        nar_hash: &str,
+        nar_size: i64,
+        manifest_hash: &str,
+    ) -> MetadataResult<()>;
+
     /// Create or update narinfo record.
     async fn upsert_narinfo(&self, narinfo: &NarInfoRow) -> MetadataResult<()>;
 

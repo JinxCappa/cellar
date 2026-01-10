@@ -1,6 +1,6 @@
 //! Metadata store trait and implementations.
 
-use crate::error::MetadataResult;
+use crate::error::{MetadataError, MetadataResult};
 use crate::repos::{
     CacheRepo, ChunkRepo, GcRepo, ManifestRepo, ReachabilityRepo, StorePathRepo, TokenRepo,
     TombstoneRepo, TrustedKeyRepo, UploadRepo,
@@ -137,6 +137,44 @@ mod sqlite_impl {
             Ok(row)
         }
 
+        async fn begin_commit_session(&self, upload_id: Uuid, updated_at: OffsetDateTime) -> MetadataResult<Option<UploadSessionRow>> {
+            // Atomically get session and transition to 'committing' state.
+            // The write operation acquires SQLite's exclusive lock, preventing concurrent commits.
+            // Only transitions if current state is 'open'.
+            let mut tx = self.pool.begin().await?;
+
+            // Get session
+            let mut session = sqlx::query_as::<_, UploadSessionRow>(
+                "SELECT * FROM upload_sessions WHERE upload_id = ?",
+            )
+            .bind(upload_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(ref mut s) = session {
+                if s.state == "open" {
+                    // Only update state if currently 'open'
+                    let result = sqlx::query("UPDATE upload_sessions SET state = ?, updated_at = ? WHERE upload_id = ? AND state = 'open'")
+                        .bind("committing")
+                        .bind(updated_at)
+                        .bind(upload_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    // Update the session object if the UPDATE succeeded
+                    if result.rows_affected() > 0 {
+                        s.state = "committing".to_string();
+                        s.updated_at = updated_at;
+                    }
+                }
+            }
+
+            tx.commit().await?;
+
+            // Return session (state will be 'committing' if transition succeeded, original state otherwise)
+            Ok(session)
+        }
+
         async fn get_session_by_store_path(
             &self,
             cache_id: Option<Uuid>,
@@ -222,7 +260,8 @@ mod sqlite_impl {
             chunk_hash: &str,
             received_at: OffsetDateTime,
         ) -> MetadataResult<()> {
-            sqlx::query(
+            // Try UPDATE first (for pre-defined expected_chunks)
+            let result = sqlx::query(
                 "UPDATE upload_expected_chunks SET received_at = ? WHERE upload_id = ? AND chunk_hash = ?",
             )
             .bind(received_at)
@@ -230,6 +269,59 @@ mod sqlite_impl {
             .bind(chunk_hash)
             .execute(&self.pool)
             .await?;
+
+            // If UPDATE didn't match any rows, INSERT a new row (for dynamic uploads without expected_chunks)
+            // This matches PostgreSQL behavior and fixes resume/missing endpoints for uploads without pre-defined chunks
+            if result.rows_affected() == 0 {
+                // Use negative positions (starting from -1, -2, ...) to avoid conflicts with
+                // expected chunks (which use positions 0, 1, 2, ...).
+                // Retry on PK conflict (race condition when multiple chunks insert concurrently).
+                const MAX_RETRIES: u32 = 5;
+                let mut last_error = None;
+
+                for _attempt in 0..MAX_RETRIES {
+                    // Get next available negative position
+                    let next_position: i32 = sqlx::query_scalar(
+                        "SELECT COALESCE(MIN(position), 0) - 1 FROM upload_expected_chunks WHERE upload_id = ?",
+                    )
+                    .bind(upload_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+
+                    match sqlx::query(
+                        "INSERT INTO upload_expected_chunks (upload_id, position, chunk_hash, size_bytes, received_at) VALUES (?, ?, ?, 0, ?)",
+                    )
+                    .bind(upload_id)
+                    .bind(next_position)
+                    .bind(chunk_hash)
+                    .bind(received_at)
+                    .execute(&self.pool)
+                    .await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            // Check if it's a primary key constraint violation
+                            // SQLite error: "UNIQUE constraint failed: upload_expected_chunks.upload_id, upload_expected_chunks.position"
+                            if let sqlx::Error::Database(ref db_err) = e {
+                                if db_err.message().contains("UNIQUE constraint") && db_err.message().contains("position") {
+                                    // Position race condition - retry with new position
+                                    last_error = Some(e);
+                                    continue;
+                                }
+                            }
+                            // Other error - return immediately
+                            return Err(e.into());
+                        }
+                    }
+                }
+
+                // Exhausted retries
+                if let Some(e) = last_error {
+                    return Err(e.into());
+                }
+                return Err(MetadataError::Internal(
+                    "failed to mark chunk received after retries".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -761,6 +853,43 @@ mod sqlite_impl {
                         .bind(store_path_hash)
                         .execute(&self.pool)
                         .await?;
+                }
+            }
+            Ok(())
+        }
+
+        async fn complete_reupload(
+            &self,
+            cache_id: Option<Uuid>,
+            store_path_hash: &str,
+            nar_hash: &str,
+            nar_size: i64,
+            manifest_hash: &str,
+        ) -> MetadataResult<()> {
+            // Atomically update visibility and metadata for successful reupload
+            match cache_id {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE store_paths SET visibility_state = 'visible', nar_hash = ?, nar_size = ?, manifest_hash = ? WHERE cache_id = ? AND store_path_hash = ?"
+                    )
+                    .bind(nar_hash)
+                    .bind(nar_size)
+                    .bind(manifest_hash)
+                    .bind(id)
+                    .bind(store_path_hash)
+                    .execute(&self.pool)
+                    .await?;
+                }
+                None => {
+                    sqlx::query(
+                        "UPDATE store_paths SET visibility_state = 'visible', nar_hash = ?, nar_size = ?, manifest_hash = ? WHERE cache_id IS NULL AND store_path_hash = ?"
+                    )
+                    .bind(nar_hash)
+                    .bind(nar_size)
+                    .bind(manifest_hash)
+                    .bind(store_path_hash)
+                    .execute(&self.pool)
+                    .await?;
                 }
             }
             Ok(())

@@ -15,6 +15,11 @@ pub trait UploadRepo: Send + Sync {
     /// Get an upload session by ID.
     async fn get_session(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>>;
 
+    /// Atomically get session with exclusive lock and transition to 'committing' state.
+    /// Returns None if session doesn't exist.
+    /// Returns the session if successful (already in 'committing' state after return).
+    async fn begin_commit_session(&self, upload_id: Uuid, updated_at: OffsetDateTime) -> MetadataResult<Option<UploadSessionRow>>;
+
     /// Get an upload session by store path hash (for resume).
     /// Filters by cache_id to ensure tenant isolation.
     async fn get_session_by_store_path(
