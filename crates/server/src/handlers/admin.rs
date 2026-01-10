@@ -9,6 +9,7 @@ use axum::Json;
 use cellar_core::token::TokenScope;
 use cellar_metadata::models::{GcJobRow, TokenRow};
 use cellar_metadata::repos::gc::{GcJobState, GcJobType, GcStats};
+use cellar_storage::error::StorageError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -129,9 +130,18 @@ pub async fn create_token(
     let token_hash = hash_token(&token_secret);
 
     let now = OffsetDateTime::now_utc();
-    let expires_at = body
-        .expires_in_secs
-        .map(|secs| now + time::Duration::seconds(secs as i64));
+    let expires_at = match body.expires_in_secs {
+        Some(secs) => {
+            let secs_i64: i64 = secs.try_into().map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "expires_in_secs too large: {secs} exceeds maximum of {}",
+                    i64::MAX
+                ))
+            })?;
+            Some(now + time::Duration::seconds(secs_i64))
+        }
+        None => None,
+    };
 
     let token_id = Uuid::new_v4();
 
@@ -432,19 +442,31 @@ async fn run_gc_job(
                         chunk.chunk_hash
                     );
 
-                    // Delete from storage
-                    if let Err(e) = storage.delete(&key).await {
-                        tracing::warn!(
-                            job_id = %job_id,
-                            chunk_hash = %chunk.chunk_hash,
-                            error = %e,
-                            "Failed to delete chunk from storage"
-                        );
-                        stats.errors += 1;
-                        continue;
-                    }
+                    // Delete from storage. NotFound is OK (already gone), other errors
+                    // are logged but we still proceed with metadata cleanup to avoid orphans.
+                    let storage_ok = match storage.delete(&key).await {
+                        Ok(()) => true,
+                        Err(StorageError::NotFound(_)) => {
+                            tracing::debug!(
+                                job_id = %job_id,
+                                chunk_hash = %chunk.chunk_hash,
+                                "Chunk already missing from storage, cleaning up metadata"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                chunk_hash = %chunk.chunk_hash,
+                                error = %e,
+                                "Failed to delete chunk from storage, proceeding with metadata cleanup"
+                            );
+                            stats.errors += 1;
+                            false
+                        }
+                    };
 
-                    // Delete from metadata
+                    // Always delete from metadata to prevent permanent orphaned rows
                     if let Err(e) = metadata.delete_chunk(&chunk.chunk_hash).await {
                         tracing::warn!(
                             job_id = %job_id,
@@ -453,7 +475,8 @@ async fn run_gc_job(
                             "Failed to delete chunk from metadata"
                         );
                         stats.errors += 1;
-                    } else {
+                    } else if storage_ok {
+                        // Only count as fully deleted if storage was successful or already gone
                         stats.items_deleted += 1;
                         stats.bytes_reclaimed += chunk.size_bytes as u64;
                     }
@@ -493,6 +516,7 @@ async fn run_gc_job(
                                 error = %e,
                                 "Failed to decrement chunk refcount"
                             );
+                            stats.errors += 1;
                         }
                     }
 
@@ -506,6 +530,7 @@ async fn run_gc_job(
                                 error = %e,
                                 "Failed to delete manifest from storage"
                             );
+                            stats.errors += 1;
                         }
                     }
 

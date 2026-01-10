@@ -142,11 +142,13 @@ mod sqlite_impl {
             cache_id: Option<Uuid>,
             store_path_hash: &str,
         ) -> MetadataResult<Option<UploadSessionRow>> {
-            // Filter by cache_id to ensure tenant isolation
+            // Filter by cache_id to ensure tenant isolation.
+            // Use ORDER BY created_at DESC LIMIT 1 to pick the most recent session
+            // deterministically when multiple open sessions exist for the same store path.
             let row = match cache_id {
                 Some(id) => {
                     sqlx::query_as::<_, UploadSessionRow>(
-                        "SELECT * FROM upload_sessions WHERE cache_id = ? AND store_path_hash = ? AND state = 'open'",
+                        "SELECT * FROM upload_sessions WHERE cache_id = ? AND store_path_hash = ? AND state = 'open' ORDER BY created_at DESC LIMIT 1",
                     )
                     .bind(id)
                     .bind(store_path_hash)
@@ -155,7 +157,7 @@ mod sqlite_impl {
                 }
                 None => {
                     sqlx::query_as::<_, UploadSessionRow>(
-                        "SELECT * FROM upload_sessions WHERE cache_id IS NULL AND store_path_hash = ? AND state = 'open'",
+                        "SELECT * FROM upload_sessions WHERE cache_id IS NULL AND store_path_hash = ? AND state = 'open' ORDER BY created_at DESC LIMIT 1",
                     )
                     .bind(store_path_hash)
                     .fetch_optional(&self.pool)
@@ -397,8 +399,21 @@ mod sqlite_impl {
             older_than: OffsetDateTime,
             limit: u32,
         ) -> MetadataResult<Vec<ChunkRow>> {
+            // Exclude chunks that are part of open upload sessions to prevent
+            // GC from deleting chunks for in-progress uploads (which temporarily have refcount=0).
             let rows = sqlx::query_as::<_, ChunkRow>(
-                "SELECT * FROM chunks WHERE refcount = 0 AND created_at < ? LIMIT ?",
+                r#"
+                SELECT * FROM chunks
+                WHERE refcount = 0
+                  AND created_at < ?
+                  AND chunk_hash NOT IN (
+                    SELECT uec.chunk_hash FROM upload_expected_chunks uec
+                    INNER JOIN upload_sessions us ON uec.upload_id = us.upload_id
+                    WHERE us.state = 'open'
+                  )
+                ORDER BY created_at
+                LIMIT ?
+                "#,
             )
             .bind(older_than)
             .bind(limit)
