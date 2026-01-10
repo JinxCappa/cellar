@@ -13,6 +13,15 @@ use futures::StreamExt;
 use serde::Serialize;
 use uuid::Uuid;
 
+/// Generate a cache-prefixed storage key path.
+/// For tenant isolation, all NAR and narinfo objects are prefixed with the cache_id.
+/// Public caches (cache_id = None) use "public" as the prefix.
+fn cache_prefix(cache_id: Option<Uuid>) -> String {
+    cache_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "public".to_string())
+}
+
 /// Extract cache_id from request context and verify CacheRead scope.
 /// For authenticated requests, verifies the token has CacheRead scope and returns the cache_id.
 /// Returns an error if the token lacks the required scope.
@@ -103,8 +112,8 @@ async fn get_narinfo_internal(
         )));
     }
 
-    // Get narinfo from storage
-    let narinfo_key = format!("narinfo/{}.narinfo", hash);
+    // Get narinfo from storage (cache_id prefixed for tenant isolation)
+    let narinfo_key = format!("{}/narinfo/{}.narinfo", cache_prefix(cache_id), hash);
     let narinfo_data = state.storage.get(&narinfo_key).await?;
 
     Ok((
@@ -148,7 +157,7 @@ pub async fn get_nar(
         // Compression::None is just an uncompressed .nar file
         if compression != cellar_core::narinfo::Compression::None {
             let extension = compression.extension();
-            let nar_key = format!("nar/{}.nar{}", hash, extension);
+            let nar_key = format!("{}/nar/{}.nar{}", cache_prefix(cache_id), hash, extension);
 
             // Use streaming to avoid loading entire compressed file into memory.
             // First get metadata for Content-Length header.

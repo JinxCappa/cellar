@@ -409,6 +409,71 @@ impl ChunkRepo for PostgresStore {
         Ok(())
     }
 
+    async fn increment_cache_refcount(
+        &self,
+        cache_id: Option<Uuid>,
+        chunk_hash: &str,
+    ) -> MetadataResult<()> {
+        // Upsert per-cache refcount and increment global refcount atomically
+        let mut tx = self.pool.begin().await?;
+
+        // Upsert per-cache reference count
+        sqlx::query(
+            r#"
+            INSERT INTO cache_chunk_refs (cache_id, chunk_hash, refcount, created_at)
+            VALUES ($1, $2, 1, NOW())
+            ON CONFLICT (COALESCE(cache_id, '00000000-0000-0000-0000-000000000000'::UUID), chunk_hash)
+            DO UPDATE SET refcount = cache_chunk_refs.refcount + 1
+            "#,
+        )
+        .bind(cache_id)
+        .bind(chunk_hash)
+        .execute(&mut *tx)
+        .await?;
+
+        // Increment global refcount
+        sqlx::query("UPDATE chunks SET refcount = refcount + 1 WHERE chunk_hash = $1")
+            .bind(chunk_hash)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn decrement_cache_refcount(
+        &self,
+        cache_id: Option<Uuid>,
+        chunk_hash: &str,
+    ) -> MetadataResult<()> {
+        // Decrement per-cache refcount and global refcount atomically
+        let mut tx = self.pool.begin().await?;
+
+        // Decrement per-cache reference count (prevent going below 0)
+        sqlx::query(
+            r#"
+            UPDATE cache_chunk_refs
+            SET refcount = refcount - 1
+            WHERE (cache_id = $1 OR ($1 IS NULL AND cache_id IS NULL))
+              AND chunk_hash = $2
+              AND refcount > 0
+            "#,
+        )
+        .bind(cache_id)
+        .bind(chunk_hash)
+        .execute(&mut *tx)
+        .await?;
+
+        // Decrement global refcount
+        sqlx::query("UPDATE chunks SET refcount = refcount - 1 WHERE chunk_hash = $1 AND refcount > 0")
+            .bind(chunk_hash)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn touch_chunk(&self, chunk_hash: &str, accessed_at: OffsetDateTime) -> MetadataResult<()> {
         sqlx::query("UPDATE chunks SET last_accessed_at = $1 WHERE chunk_hash = $2")
             .bind(accessed_at)
@@ -905,10 +970,21 @@ impl StorePathRepo for PostgresStore {
         Ok(rows)
     }
 
-    async fn count_store_paths(&self) -> MetadataResult<u64> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM store_paths")
-            .fetch_one(&self.pool)
-            .await?;
+    async fn count_store_paths(&self, cache_id: Option<Uuid>) -> MetadataResult<u64> {
+        // Filter by cache_id for tenant isolation
+        let count: i64 = match cache_id {
+            Some(id) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM store_paths WHERE cache_id = $1")
+                    .bind(id)
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM store_paths WHERE cache_id IS NULL")
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+        };
         Ok(count as u64)
     }
 
@@ -1292,22 +1368,53 @@ impl GcRepo for PostgresStore {
         Ok(())
     }
 
-    async fn get_recent_gc_jobs(&self, limit: u32) -> MetadataResult<Vec<GcJobRow>> {
-        let rows = sqlx::query_as::<_, GcJobRow>(
-            "SELECT * FROM gc_jobs ORDER BY COALESCE(started_at, 'epoch') DESC LIMIT $1",
-        )
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
+    async fn get_recent_gc_jobs(
+        &self,
+        cache_id: Option<Uuid>,
+        limit: u32,
+    ) -> MetadataResult<Vec<GcJobRow>> {
+        // Filter by cache_id for tenant isolation
+        let rows = match cache_id {
+            Some(id) => {
+                sqlx::query_as::<_, GcJobRow>(
+                    "SELECT * FROM gc_jobs WHERE cache_id = $1 ORDER BY COALESCE(started_at, 'epoch') DESC LIMIT $2",
+                )
+                .bind(id)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, GcJobRow>(
+                    "SELECT * FROM gc_jobs WHERE cache_id IS NULL ORDER BY COALESCE(started_at, 'epoch') DESC LIMIT $1",
+                )
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
         Ok(rows)
     }
 
-    async fn get_running_gc_jobs(&self) -> MetadataResult<Vec<GcJobRow>> {
-        let rows = sqlx::query_as::<_, GcJobRow>(
-            "SELECT * FROM gc_jobs WHERE state = 'running' ORDER BY started_at DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn get_running_gc_jobs(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<GcJobRow>> {
+        // Filter by cache_id for tenant isolation
+        let rows = match cache_id {
+            Some(id) => {
+                sqlx::query_as::<_, GcJobRow>(
+                    "SELECT * FROM gc_jobs WHERE cache_id = $1 AND state = 'running' ORDER BY started_at DESC",
+                )
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, GcJobRow>(
+                    "SELECT * FROM gc_jobs WHERE cache_id IS NULL AND state = 'running' ORDER BY started_at DESC",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
         Ok(rows)
     }
 }
@@ -1611,12 +1718,25 @@ impl TombstoneRepo for PostgresStore {
 // F-006: ReachabilityRepo implementation
 #[async_trait]
 impl ReachabilityRepo for PostgresStore {
-    async fn get_all_visible_manifests(&self) -> MetadataResult<Vec<String>> {
-        let rows = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible'",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn get_all_visible_manifests(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<String>> {
+        // Filter by cache_id for tenant isolation
+        let rows = match cache_id {
+            Some(id) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible' AND cache_id = $1",
+                )
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible' AND cache_id IS NULL",
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
         Ok(rows)
     }
 

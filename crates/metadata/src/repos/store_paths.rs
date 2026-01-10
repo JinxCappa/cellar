@@ -70,8 +70,8 @@ pub trait StorePathRepo: Send + Sync {
         manifest_hash: &str,
     ) -> MetadataResult<Vec<StorePathRow>>;
 
-    /// Get total store path count.
-    async fn count_store_paths(&self) -> MetadataResult<u64>;
+    /// Get total store path count for a specific cache.
+    async fn count_store_paths(&self, cache_id: Option<Uuid>) -> MetadataResult<u64>;
 
     // F-003: Store path reference methods
 

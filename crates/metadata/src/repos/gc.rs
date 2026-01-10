@@ -25,11 +25,15 @@ pub trait GcRepo: Send + Sync {
         stats_json: Option<&str>,
     ) -> MetadataResult<()>;
 
-    /// Get recent GC jobs.
-    async fn get_recent_gc_jobs(&self, limit: u32) -> MetadataResult<Vec<GcJobRow>>;
+    /// Get recent GC jobs for a specific cache.
+    async fn get_recent_gc_jobs(
+        &self,
+        cache_id: Option<Uuid>,
+        limit: u32,
+    ) -> MetadataResult<Vec<GcJobRow>>;
 
-    /// Get running GC jobs.
-    async fn get_running_gc_jobs(&self) -> MetadataResult<Vec<GcJobRow>>;
+    /// Get running GC jobs for a specific cache.
+    async fn get_running_gc_jobs(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<GcJobRow>>;
 }
 
 /// GC job types.
@@ -137,8 +141,8 @@ pub struct ReachabilityStats {
 /// Repository trait extension for reachability GC operations.
 #[async_trait]
 pub trait ReachabilityRepo: Send + Sync {
-    /// Get all manifest hashes from visible store paths.
-    async fn get_all_visible_manifests(&self) -> MetadataResult<Vec<String>>;
+    /// Get all manifest hashes from visible store paths for a specific cache.
+    async fn get_all_visible_manifests(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<String>>;
 
     /// Get chunk hashes for a manifest (for walking the reference graph).
     async fn get_chunks_for_manifest(&self, manifest_hash: &str) -> MetadataResult<Vec<String>>;
