@@ -1002,15 +1002,18 @@ mod sqlite_impl {
         ) -> MetadataResult<u64> {
             // Delete failed store paths that are older than the specified age.
             // This allows a grace period for debugging before cleanup.
-            // SQLite uses datetime() function instead of PostgreSQL's interval syntax.
+            // Compute cutoff time in Rust to ensure consistent RFC3339 format
+            // (SQLite's datetime() returns 'YYYY-MM-DD HH:MM:SS' which doesn't
+            // compare correctly with RFC3339 'YYYY-MM-DDTHH:MM:SSZ' stored by sqlx).
+            let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(age_seconds);
             let result = sqlx::query(
                 r#"
                 DELETE FROM store_paths
                 WHERE visibility_state = 'failed'
-                  AND committed_at < datetime('now', '-' || ? || ' seconds')
+                  AND committed_at < ?
                 "#,
             )
-            .bind(age_seconds)
+            .bind(cutoff)
             .execute(&self.pool)
             .await?;
             Ok(result.rows_affected())
