@@ -120,18 +120,6 @@ impl UploadRepo for PostgresStore {
         Ok(row)
     }
 
-    async fn get_session_for_commit(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>> {
-        // SELECT FOR UPDATE acquires an exclusive row lock, preventing concurrent commits
-        // on the same upload_id. The lock is held until the transaction commits/rolls back.
-        let row = sqlx::query_as::<_, UploadSessionRow>(
-            "SELECT * FROM upload_sessions WHERE upload_id = $1 FOR UPDATE",
-        )
-        .bind(upload_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row)
-    }
-
     async fn begin_commit_session(&self, upload_id: Uuid, updated_at: OffsetDateTime) -> MetadataResult<Option<UploadSessionRow>> {
         // Atomically get session with FOR UPDATE lock and transition to 'committing' state.
         // This prevents the race condition where two commits both see state='open' and proceed.

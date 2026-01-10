@@ -1,6 +1,6 @@
 //! Metadata store trait and implementations.
 
-use crate::error::MetadataResult;
+use crate::error::{MetadataError, MetadataResult};
 use crate::repos::{
     CacheRepo, ChunkRepo, GcRepo, ManifestRepo, ReachabilityRepo, StorePathRepo, TokenRepo,
     TombstoneRepo, TrustedKeyRepo, UploadRepo,
@@ -128,24 +128,6 @@ mod sqlite_impl {
         }
 
         async fn get_session(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>> {
-            let row = sqlx::query_as::<_, UploadSessionRow>(
-                "SELECT * FROM upload_sessions WHERE upload_id = ?",
-            )
-            .bind(upload_id)
-            .fetch_optional(&self.pool)
-            .await?;
-            Ok(row)
-        }
-
-        async fn get_session_for_commit(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>> {
-            // SQLite doesn't support SELECT FOR UPDATE, but it uses database-level locking.
-            // Concurrency protection is achieved by the commit handler immediately performing
-            // a write operation (update_state to "committing") after this read, which:
-            // 1. Acquires SQLite's write lock (RESERVED -> EXCLUSIVE)
-            // 2. Prevents concurrent commits from proceeding (state check will fail)
-            // 3. Ensures only one commit can succeed per upload_id
-            //
-            // This pattern is equivalent to PostgreSQL's FOR UPDATE for the commit use case.
             let row = sqlx::query_as::<_, UploadSessionRow>(
                 "SELECT * FROM upload_sessions WHERE upload_id = ?",
             )
@@ -291,15 +273,54 @@ mod sqlite_impl {
             // If UPDATE didn't match any rows, INSERT a new row (for dynamic uploads without expected_chunks)
             // This matches PostgreSQL behavior and fixes resume/missing endpoints for uploads without pre-defined chunks
             if result.rows_affected() == 0 {
-                // INSERT with position=-1 as a sentinel for dynamic chunks
-                let _ = sqlx::query(
-                    "INSERT OR IGNORE INTO upload_expected_chunks (upload_id, position, chunk_hash, size_bytes, received_at) VALUES (?, -1, ?, 0, ?)",
-                )
-                .bind(upload_id)
-                .bind(chunk_hash)
-                .bind(received_at)
-                .execute(&self.pool)
-                .await?;
+                // Use negative positions (starting from -1, -2, ...) to avoid conflicts with
+                // expected chunks (which use positions 0, 1, 2, ...).
+                // Retry on PK conflict (race condition when multiple chunks insert concurrently).
+                const MAX_RETRIES: u32 = 5;
+                let mut last_error = None;
+
+                for _attempt in 0..MAX_RETRIES {
+                    // Get next available negative position
+                    let next_position: i32 = sqlx::query_scalar(
+                        "SELECT COALESCE(MIN(position), 0) - 1 FROM upload_expected_chunks WHERE upload_id = ?",
+                    )
+                    .bind(upload_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+
+                    match sqlx::query(
+                        "INSERT INTO upload_expected_chunks (upload_id, position, chunk_hash, size_bytes, received_at) VALUES (?, ?, ?, 0, ?)",
+                    )
+                    .bind(upload_id)
+                    .bind(next_position)
+                    .bind(chunk_hash)
+                    .bind(received_at)
+                    .execute(&self.pool)
+                    .await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            // Check if it's a primary key constraint violation
+                            // SQLite error: "UNIQUE constraint failed: upload_expected_chunks.upload_id, upload_expected_chunks.position"
+                            if let sqlx::Error::Database(ref db_err) = e {
+                                if db_err.message().contains("UNIQUE constraint") && db_err.message().contains("position") {
+                                    // Position race condition - retry with new position
+                                    last_error = Some(e);
+                                    continue;
+                                }
+                            }
+                            // Other error - return immediately
+                            return Err(e.into());
+                        }
+                    }
+                }
+
+                // Exhausted retries
+                if let Some(e) = last_error {
+                    return Err(e.into());
+                }
+                return Err(MetadataError::Internal(
+                    "failed to mark chunk received after retries".to_string(),
+                ));
             }
             Ok(())
         }

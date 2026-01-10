@@ -468,7 +468,7 @@ pub async fn upload_chunk(
             return Err(e.into());
         }
 
-        if needs_metadata_upsert {
+        if !was_new && needs_metadata_upsert {
             tracing::info!(
                 upload_id = %upload_id,
                 chunk_hash = %chunk_hash,
