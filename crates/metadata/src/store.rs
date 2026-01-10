@@ -1005,12 +1005,13 @@ mod sqlite_impl {
             // Compute cutoff time in Rust to ensure consistent RFC3339 format
             // (SQLite's datetime() returns 'YYYY-MM-DD HH:MM:SS' which doesn't
             // compare correctly with RFC3339 'YYYY-MM-DDTHH:MM:SSZ' stored by sqlx).
+            // Use COALESCE to handle NULL committed_at (failed uploads that never completed).
             let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(age_seconds);
             let result = sqlx::query(
                 r#"
                 DELETE FROM store_paths
                 WHERE visibility_state = 'failed'
-                  AND committed_at < ?
+                  AND COALESCE(committed_at, created_at) < ?
                 "#,
             )
             .bind(cutoff)

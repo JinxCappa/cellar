@@ -175,16 +175,23 @@ const MIN_FLUSH_SIZE: usize = 8 * 1024 * 1024;
 ///
 /// The compressor writes to a temporary key, and the caller is responsible for
 /// copying to the final content-addressed key after getting the hash from `finish()`.
+///
+/// The compressor maintains a single encoder instance across all chunks, ensuring
+/// optimal compression efficiency by preserving cross-chunk dictionary context.
 pub struct TrueStreamingCompressor {
     upload: Box<dyn StreamingUpload>,
     hasher: ContentHasher,
     buffer: Vec<u8>,
     temp_key: String,
     bytes_flushed: u64,
-    compression: CompressionConfig,
-    // We store uncompressed data and compress in batches for simplicity.
-    // A more sophisticated implementation would use async_compression's stream adapters.
-    pending_data: Vec<u8>,
+    encoder: TrueStreamingEncoder,
+}
+
+/// Internal encoder state for true streaming compression.
+enum TrueStreamingEncoder {
+    None,
+    Zstd(ZstdEncoder<Vec<u8>>),
+    Xz(XzEncoder<Vec<u8>>),
 }
 
 impl TrueStreamingCompressor {
@@ -194,14 +201,31 @@ impl TrueStreamingCompressor {
         compression: CompressionConfig,
         temp_key: String,
     ) -> Self {
+        let encoder = match compression {
+            CompressionConfig::None => TrueStreamingEncoder::None,
+            CompressionConfig::Zstd => {
+                let output = Vec::new();
+                TrueStreamingEncoder::Zstd(ZstdEncoder::with_quality(
+                    output,
+                    async_compression::Level::Default,
+                ))
+            }
+            CompressionConfig::Xz => {
+                let output = Vec::new();
+                TrueStreamingEncoder::Xz(XzEncoder::with_quality(
+                    output,
+                    async_compression::Level::Default,
+                ))
+            }
+        };
+
         Self {
             upload,
             hasher: ContentHash::hasher(),
             buffer: Vec::with_capacity(MIN_FLUSH_SIZE + 1024 * 1024), // Extra space for compression overhead
             temp_key,
             bytes_flushed: 0,
-            compression,
-            pending_data: Vec::new(),
+            encoder,
         }
     }
 
@@ -210,50 +234,34 @@ impl TrueStreamingCompressor {
     /// The data will be compressed and written to storage when the internal
     /// buffer exceeds the flush threshold.
     pub async fn write_chunk(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.pending_data.extend_from_slice(data);
-
-        // Compress and flush when we have enough pending data
-        // We compress in chunks to balance memory usage and compression efficiency
-        while self.pending_data.len() >= MIN_FLUSH_SIZE {
-            self.compress_and_buffer_chunk(MIN_FLUSH_SIZE).await?;
-
-            // Flush to storage when buffer is full - must be inside the loop
-            // to maintain streaming behavior and bounded memory usage
-            if self.buffer.len() >= MIN_FLUSH_SIZE {
-                self.flush_buffer().await?;
+        // Write data to encoder (or buffer for uncompressed)
+        match &mut self.encoder {
+            TrueStreamingEncoder::None => {
+                self.buffer.extend_from_slice(data);
+            }
+            TrueStreamingEncoder::Zstd(encoder) => {
+                encoder.write_all(data).await?;
+                // Flush encoder to push compressed data to the inner buffer
+                encoder.flush().await?;
+                // Drain compressed output from encoder's inner buffer
+                let output = encoder.get_mut();
+                self.buffer.append(output);
+            }
+            TrueStreamingEncoder::Xz(encoder) => {
+                encoder.write_all(data).await?;
+                // Flush encoder to push compressed data to the inner buffer
+                encoder.flush().await?;
+                // Drain compressed output from encoder's inner buffer
+                let output = encoder.get_mut();
+                self.buffer.append(output);
             }
         }
 
-        Ok(())
-    }
+        // Flush to storage when buffer exceeds threshold
+        while self.buffer.len() >= MIN_FLUSH_SIZE {
+            self.flush_buffer().await?;
+        }
 
-    /// Compress a chunk of pending data and add to buffer.
-    async fn compress_and_buffer_chunk(&mut self, size: usize) -> std::io::Result<()> {
-        let chunk: Vec<u8> = self.pending_data.drain(..size).collect();
-
-        let compressed = match self.compression {
-            CompressionConfig::None => chunk,
-            CompressionConfig::Zstd => {
-                // Compress the chunk using zstd
-                let mut output = Vec::new();
-                let mut encoder =
-                    ZstdEncoder::with_quality(&mut output, async_compression::Level::Default);
-                encoder.write_all(&chunk).await?;
-                encoder.shutdown().await?;
-                output
-            }
-            CompressionConfig::Xz => {
-                // Compress the chunk using xz
-                let mut output = Vec::new();
-                let mut encoder =
-                    XzEncoder::with_quality(&mut output, async_compression::Level::Default);
-                encoder.write_all(&chunk).await?;
-                encoder.shutdown().await?;
-                output
-            }
-        };
-
-        self.buffer.extend_from_slice(&compressed);
         Ok(())
     }
 
@@ -280,32 +288,29 @@ impl TrueStreamingCompressor {
 
     /// Finalize compression and return the result.
     ///
-    /// This compresses any remaining data, flushes to storage, and returns
+    /// This finalizes the encoder, flushes remaining data to storage, and returns
     /// the hash and total size of the compressed data.
     pub async fn finish(mut self) -> std::io::Result<StreamingCompressionResult> {
-        // Compress any remaining pending data
-        if !self.pending_data.is_empty() {
-            let remaining = std::mem::take(&mut self.pending_data);
-            let compressed = match self.compression {
-                CompressionConfig::None => remaining,
-                CompressionConfig::Zstd => {
-                    let mut output = Vec::new();
-                    let mut encoder =
-                        ZstdEncoder::with_quality(&mut output, async_compression::Level::Default);
-                    encoder.write_all(&remaining).await?;
-                    encoder.shutdown().await?;
-                    output
-                }
-                CompressionConfig::Xz => {
-                    let mut output = Vec::new();
-                    let mut encoder =
-                        XzEncoder::with_quality(&mut output, async_compression::Level::Default);
-                    encoder.write_all(&remaining).await?;
-                    encoder.shutdown().await?;
-                    output
-                }
-            };
-            self.buffer.extend_from_slice(&compressed);
+        // Take ownership of encoder to finalize it
+        let encoder = std::mem::replace(&mut self.encoder, TrueStreamingEncoder::None);
+
+        // Finalize the encoder and get any remaining compressed data
+        match encoder {
+            TrueStreamingEncoder::None => {
+                // No compression, buffer already contains all data
+            }
+            TrueStreamingEncoder::Zstd(mut encoder) => {
+                // Shutdown finalizes the zstd stream and writes remaining data
+                encoder.shutdown().await?;
+                let final_output = encoder.into_inner();
+                self.buffer.extend_from_slice(&final_output);
+            }
+            TrueStreamingEncoder::Xz(mut encoder) => {
+                // Shutdown finalizes the xz stream and writes remaining data
+                encoder.shutdown().await?;
+                let final_output = encoder.into_inner();
+                self.buffer.extend_from_slice(&final_output);
+            }
         }
 
         // Flush any remaining buffer
