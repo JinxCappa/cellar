@@ -216,11 +216,12 @@ impl TrueStreamingCompressor {
         // We compress in chunks to balance memory usage and compression efficiency
         while self.pending_data.len() >= MIN_FLUSH_SIZE {
             self.compress_and_buffer_chunk(MIN_FLUSH_SIZE).await?;
-        }
 
-        // Flush to storage when buffer is full
-        if self.buffer.len() >= MIN_FLUSH_SIZE {
-            self.flush_buffer().await?;
+            // Flush to storage when buffer is full - must be inside the loop
+            // to maintain streaming behavior and bounded memory usage
+            if self.buffer.len() >= MIN_FLUSH_SIZE {
+                self.flush_buffer().await?;
+            }
         }
 
         Ok(())
