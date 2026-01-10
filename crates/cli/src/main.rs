@@ -98,6 +98,9 @@ enum GcCommands {
     Status {
         /// Job ID (optional, shows recent jobs if not specified)
         job_id: Option<String>,
+        /// Cache ID to filter jobs (optional, shows public cache jobs if not specified)
+        #[arg(long)]
+        cache_id: Option<String>,
     },
 }
 
@@ -106,7 +109,11 @@ enum DbCommands {
     /// Run database migrations
     Migrate,
     /// Show database statistics
-    Stats,
+    Stats {
+        /// Cache ID to filter stats (optional, shows public cache stats if not specified)
+        #[arg(long)]
+        cache_id: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -492,8 +499,15 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
                 anyhow::bail!("GC job failed: {e}");
             }
         }
-        GcCommands::Status { job_id } => {
+        GcCommands::Status { job_id, cache_id } => {
             use uuid::Uuid;
+
+            // Parse cache_id if provided
+            let cache_uuid = cache_id
+                .as_ref()
+                .map(|id| Uuid::parse_str(id))
+                .transpose()
+                .context("invalid cache ID")?;
 
             if let Some(id) = job_id {
                 let job_id = Uuid::parse_str(&id).context("invalid job ID")?;
@@ -524,7 +538,8 @@ async fn handle_gc_command(command: GcCommands, config: &AppConfig) -> Result<()
                     println!("Job not found: {id}");
                 }
             } else {
-                let jobs = metadata.get_recent_gc_jobs(10).await?;
+                // Filter by cache_id if provided, otherwise show public cache jobs
+                let jobs = metadata.get_recent_gc_jobs(cache_uuid, 10).await?;
                 if jobs.is_empty() {
                     println!("No GC jobs found.");
                 } else {
@@ -560,15 +575,26 @@ async fn handle_db_command(command: DbCommands, config: &AppConfig) -> Result<()
             metadata.migrate().await?;
             println!("Migrations completed successfully.");
         }
-        DbCommands::Stats => {
+        DbCommands::Stats { cache_id } => {
+            use uuid::Uuid;
+
             let metadata = cellar_metadata::from_config(&config.metadata)
                 .await
                 .context("failed to initialize metadata store")?;
 
-            let store_paths = metadata.count_store_paths().await?;
+            // Parse cache_id if provided
+            let cache_uuid = cache_id
+                .as_ref()
+                .map(|id| Uuid::parse_str(id))
+                .transpose()
+                .context("invalid cache ID")?;
+
+            // Filter by cache_id if provided, otherwise show public cache stats
+            let store_paths = metadata.count_store_paths(cache_uuid).await?;
             let chunk_stats = metadata.get_stats().await?;
 
-            println!("Database Statistics:");
+            let cache_label = cache_id.as_deref().unwrap_or("public");
+            println!("Database Statistics (cache: {cache_label}):");
             println!("  Store paths: {store_paths}");
             println!("  Total chunks: {}", chunk_stats.count);
             println!("  Total chunk size: {} bytes", chunk_stats.total_size);

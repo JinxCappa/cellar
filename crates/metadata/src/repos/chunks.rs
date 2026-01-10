@@ -4,6 +4,7 @@ use crate::error::MetadataResult;
 use crate::models::ChunkRow;
 use async_trait::async_trait;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 /// Repository for chunk operations.
 #[async_trait]
@@ -22,6 +23,22 @@ pub trait ChunkRepo: Send + Sync {
 
     /// Decrement chunk reference count.
     async fn decrement_refcount(&self, chunk_hash: &str) -> MetadataResult<()>;
+
+    /// Increment per-cache chunk reference count.
+    /// This also increments the global refcount.
+    async fn increment_cache_refcount(
+        &self,
+        cache_id: Option<Uuid>,
+        chunk_hash: &str,
+    ) -> MetadataResult<()>;
+
+    /// Decrement per-cache chunk reference count.
+    /// This also decrements the global refcount.
+    async fn decrement_cache_refcount(
+        &self,
+        cache_id: Option<Uuid>,
+        chunk_hash: &str,
+    ) -> MetadataResult<()>;
 
     /// Update last accessed time.
     async fn touch_chunk(&self, chunk_hash: &str, accessed_at: OffsetDateTime) -> MetadataResult<()>;

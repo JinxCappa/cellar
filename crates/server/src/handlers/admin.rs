@@ -65,7 +65,9 @@ pub async fn get_metrics(
     let auth = require_auth(&req)?;
     auth.require_scope(TokenScope::CacheAdmin)?;
 
-    let store_paths_count = state.metadata.count_store_paths().await?;
+    // Scope metrics to the authenticated cache for tenant isolation
+    let store_paths_count = state.metadata.count_store_paths(auth.token.cache_id).await?;
+    // Note: chunk_stats remain global since chunks are shared across caches for deduplication
     let chunk_stats = state.metadata.get_stats().await?;
 
     // Get prometheus metrics
@@ -124,6 +126,13 @@ pub async fn create_token(
         serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::BadRequest(format!("invalid JSON: {e}")))?
     };
+
+    // Validate all scopes before storing - reject unknown scopes
+    for scope in &body.scopes {
+        TokenScope::parse(scope).map_err(|_| {
+            ApiError::BadRequest(format!("invalid scope: {scope}"))
+        })?;
+    }
 
     // Generate token secret
     let token_secret = generate_token_secret();
@@ -190,6 +199,19 @@ pub async fn revoke_token(
 
     let token_id =
         Uuid::parse_str(&token_id).map_err(|e| ApiError::BadRequest(format!("invalid token ID: {e}")))?;
+
+    // Verify token ownership - only allow revoking tokens from the same cache
+    let token = state
+        .metadata
+        .get_token(token_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("token not found".to_string()))?;
+
+    if token.cache_id != auth.token.cache_id {
+        return Err(ApiError::Forbidden(
+            "cannot revoke token from another cache".to_string(),
+        ));
+    }
 
     state
         .metadata
@@ -322,6 +344,13 @@ pub async fn get_gc_job(
         .get_gc_job(job_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("GC job not found".to_string()))?;
+
+    // Verify GC job ownership - only allow viewing jobs from the same cache
+    if job.cache_id != auth.token.cache_id {
+        return Err(ApiError::Forbidden(
+            "cannot view GC job from another cache".to_string(),
+        ));
+    }
 
     let stats: Option<GcStats> = job
         .stats_json

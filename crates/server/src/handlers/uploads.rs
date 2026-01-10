@@ -32,6 +32,15 @@ use uuid::Uuid;
 /// Maximum request body size for create upload requests (1 MiB).
 const MAX_CREATE_BODY_SIZE: usize = 1024 * 1024;
 
+/// Generate a cache-prefixed storage key path.
+/// For tenant isolation, all NAR and narinfo objects are prefixed with the cache_id.
+/// Public caches (cache_id = None) use "public" as the prefix.
+fn cache_prefix(cache_id: Option<Uuid>) -> String {
+    cache_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "public".to_string())
+}
+
 /// Maximum request body size for commit requests (10 MiB).
 const MAX_COMMIT_BODY_SIZE: usize = 10 * 1024 * 1024;
 
@@ -927,7 +936,7 @@ pub async fn commit_upload(
         // Copy from temp key to final content-addressed key
         let compression = compression_config.to_compression();
         let extension = compression.extension();
-        let nar_key = format!("nar/{}.nar{}", store_path.hash(), extension);
+        let nar_key = format!("{}/nar/{}.nar{}", cache_prefix(session.cache_id), store_path.hash(), extension);
         try_with_cleanup!(state.storage.copy(&temp_nar_key, &nar_key).await);
         artifacts.compressed_nar_key = Some(nar_key);
 
@@ -967,7 +976,7 @@ pub async fn commit_upload(
     }
 
     // Store narinfo
-    let narinfo_key = format!("narinfo/{}.narinfo", store_path.hash());
+    let narinfo_key = format!("{}/narinfo/{}.narinfo", cache_prefix(session.cache_id), store_path.hash());
     let narinfo_text = narinfo.to_narinfo_text();
     try_with_cleanup!(state.storage.put(&narinfo_key, Bytes::from(narinfo_text)).await);
     artifacts.narinfo_key = Some(narinfo_key.clone());

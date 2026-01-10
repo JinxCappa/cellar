@@ -343,8 +343,8 @@ async fn test_postgres_store_path_operations() {
     assert_eq!(paths.len(), 1);
     assert_eq!(paths[0].store_path_hash, path_hash);
 
-    // Test count_store_paths
-    let count = store.count_store_paths().await.expect("Count failed");
+    // Test count_store_paths (None = public cache, matching the test store path)
+    let count = store.count_store_paths(None).await.expect("Count failed");
     assert!(count >= 1);
 }
 
@@ -461,8 +461,8 @@ async fn test_postgres_gc_job_operations() {
         .await
         .expect("Update state failed");
 
-    // Check running jobs
-    let running = store.get_running_gc_jobs().await.expect("Get running failed");
+    // Check running jobs (None = public cache, matching the job's cache_id)
+    let running = store.get_running_gc_jobs(None).await.expect("Get running failed");
     assert!(!running.is_empty());
 
     // Complete the job
@@ -476,8 +476,8 @@ async fn test_postgres_gc_job_operations() {
     assert_eq!(retrieved.state, "finished");
     assert!(retrieved.stats_json.is_some());
 
-    // Check recent jobs
-    let recent = store.get_recent_gc_jobs(10).await.expect("Get recent failed");
+    // Check recent jobs (None = public cache, matching the job's cache_id)
+    let recent = store.get_recent_gc_jobs(None, 10).await.expect("Get recent failed");
     assert!(!recent.is_empty());
 }
 

@@ -30,7 +30,7 @@ pub trait MetadataStore:
     /// Run database migrations.
     async fn migrate(&self) -> MetadataResult<()>;
 
-    /// Begin a transaction (placeholder for future use).
+    /// Check database connectivity and health.
     async fn health_check(&self) -> MetadataResult<()>;
 }
 
@@ -378,6 +378,77 @@ mod sqlite_impl {
             .bind(chunk_hash)
             .execute(&self.pool)
             .await?;
+            Ok(())
+        }
+
+        async fn increment_cache_refcount(
+            &self,
+            cache_id: Option<Uuid>,
+            chunk_hash: &str,
+        ) -> MetadataResult<()> {
+            // Use a transaction to ensure atomicity of both operations
+            let mut tx = self.pool.begin().await?;
+
+            // Upsert per-cache reference count
+            sqlx::query(
+                r#"
+                INSERT INTO cache_chunk_refs (cache_id, chunk_hash, refcount, created_at)
+                VALUES (?, ?, 1, datetime('now'))
+                ON CONFLICT (COALESCE(cache_id, X'00000000000000000000000000000000'), chunk_hash)
+                DO UPDATE SET refcount = cache_chunk_refs.refcount + 1
+                "#,
+            )
+            .bind(cache_id)
+            .bind(chunk_hash)
+            .execute(&mut *tx)
+            .await?;
+
+            // Increment global refcount
+            sqlx::query("UPDATE chunks SET refcount = refcount + 1 WHERE chunk_hash = ?")
+                .bind(chunk_hash)
+                .execute(&mut *tx)
+                .await?;
+
+            tx.commit().await?;
+            Ok(())
+        }
+
+        async fn decrement_cache_refcount(
+            &self,
+            cache_id: Option<Uuid>,
+            chunk_hash: &str,
+        ) -> MetadataResult<()> {
+            // Use a transaction to ensure atomicity of both operations
+            let mut tx = self.pool.begin().await?;
+
+            // Decrement per-cache reference count (prevent going below 0)
+            let result = sqlx::query(
+                r#"
+                UPDATE cache_chunk_refs
+                SET refcount = refcount - 1
+                WHERE (cache_id = ? OR (? IS NULL AND cache_id IS NULL))
+                  AND chunk_hash = ?
+                  AND refcount > 0
+                "#,
+            )
+            .bind(cache_id)
+            .bind(cache_id)
+            .bind(chunk_hash)
+            .execute(&mut *tx)
+            .await?;
+
+            // Only decrement global refcount if the per-cache decrement actually affected a row.
+            // This prevents desync when the per-cache ref doesn't exist or is already 0.
+            if result.rows_affected() > 0 {
+                sqlx::query(
+                    "UPDATE chunks SET refcount = refcount - 1 WHERE chunk_hash = ? AND refcount > 0",
+                )
+                .bind(chunk_hash)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            tx.commit().await?;
             Ok(())
         }
 
@@ -880,11 +951,21 @@ mod sqlite_impl {
             Ok(rows)
         }
 
-        async fn count_store_paths(&self) -> MetadataResult<u64> {
-            let (count,): (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM store_paths WHERE visibility_state = 'visible'")
-                    .fetch_one(&self.pool)
-                    .await?;
+        async fn count_store_paths(&self, cache_id: Option<Uuid>) -> MetadataResult<u64> {
+            // Filter by cache_id for tenant isolation
+            let (count,): (i64,) = match cache_id {
+                Some(id) => {
+                    sqlx::query_as("SELECT COUNT(*) FROM store_paths WHERE visibility_state = 'visible' AND cache_id = ?")
+                        .bind(id)
+                        .fetch_one(&self.pool)
+                        .await?
+                }
+                None => {
+                    sqlx::query_as("SELECT COUNT(*) FROM store_paths WHERE visibility_state = 'visible' AND cache_id IS NULL")
+                        .fetch_one(&self.pool)
+                        .await?
+                }
+            };
             Ok(count as u64)
         }
 
@@ -1291,22 +1372,53 @@ mod sqlite_impl {
             Ok(())
         }
 
-        async fn get_recent_gc_jobs(&self, limit: u32) -> MetadataResult<Vec<GcJobRow>> {
-            let rows = sqlx::query_as::<_, GcJobRow>(
-                "SELECT * FROM gc_jobs ORDER BY started_at DESC LIMIT ?",
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        async fn get_recent_gc_jobs(
+            &self,
+            cache_id: Option<Uuid>,
+            limit: u32,
+        ) -> MetadataResult<Vec<GcJobRow>> {
+            // Filter by cache_id for tenant isolation
+            let rows = match cache_id {
+                Some(id) => {
+                    sqlx::query_as::<_, GcJobRow>(
+                        "SELECT * FROM gc_jobs WHERE cache_id = ? ORDER BY started_at DESC LIMIT ?",
+                    )
+                    .bind(id)
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+                None => {
+                    sqlx::query_as::<_, GcJobRow>(
+                        "SELECT * FROM gc_jobs WHERE cache_id IS NULL ORDER BY started_at DESC LIMIT ?",
+                    )
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+            };
             Ok(rows)
         }
 
-        async fn get_running_gc_jobs(&self) -> MetadataResult<Vec<GcJobRow>> {
-            let rows = sqlx::query_as::<_, GcJobRow>(
-                "SELECT * FROM gc_jobs WHERE state = 'running'",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+        async fn get_running_gc_jobs(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<GcJobRow>> {
+            // Filter by cache_id for tenant isolation
+            let rows = match cache_id {
+                Some(id) => {
+                    sqlx::query_as::<_, GcJobRow>(
+                        "SELECT * FROM gc_jobs WHERE cache_id = ? AND state = 'running'",
+                    )
+                    .bind(id)
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+                None => {
+                    sqlx::query_as::<_, GcJobRow>(
+                        "SELECT * FROM gc_jobs WHERE cache_id IS NULL AND state = 'running'",
+                    )
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+            };
             Ok(rows)
         }
     }
@@ -1610,12 +1722,25 @@ mod sqlite_impl {
     // F-006: ReachabilityRepo implementation
     #[async_trait]
     impl crate::repos::ReachabilityRepo for SqliteStore {
-        async fn get_all_visible_manifests(&self) -> MetadataResult<Vec<String>> {
-            let rows: Vec<(String,)> = sqlx::query_as(
-                "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible'",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+        async fn get_all_visible_manifests(&self, cache_id: Option<Uuid>) -> MetadataResult<Vec<String>> {
+            // Filter by cache_id for tenant isolation
+            let rows: Vec<(String,)> = match cache_id {
+                Some(id) => {
+                    sqlx::query_as(
+                        "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible' AND cache_id = ?",
+                    )
+                    .bind(id)
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+                None => {
+                    sqlx::query_as(
+                        "SELECT DISTINCT manifest_hash FROM store_paths WHERE visibility_state = 'visible' AND cache_id IS NULL",
+                    )
+                    .fetch_all(&self.pool)
+                    .await?
+                }
+            };
             Ok(rows.into_iter().map(|r| r.0).collect())
         }
 
@@ -1725,6 +1850,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     last_accessed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_refcount ON chunks(refcount, created_at);
+
+-- Per-cache chunk references for tenant-isolated garbage collection.
+-- The global chunks.refcount is the sum of all per-cache refcounts.
+-- GC operations use this table to scope reference counting by cache_id.
+CREATE TABLE IF NOT EXISTS cache_chunk_refs (
+    cache_id BLOB,
+    chunk_hash TEXT NOT NULL,
+    refcount INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (COALESCE(cache_id, X'00000000000000000000000000000000'), chunk_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_cache_chunk_refs_chunk ON cache_chunk_refs(chunk_hash);
 
 -- Manifests
 CREATE TABLE IF NOT EXISTS manifests (

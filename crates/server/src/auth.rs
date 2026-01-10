@@ -119,7 +119,19 @@ pub async fn auth_middleware(
 
             let scopes: HashSet<TokenScope> = scopes
                 .iter()
-                .filter_map(|s| TokenScope::parse(s).ok())
+                .filter_map(|s| {
+                    match TokenScope::parse(s) {
+                        Ok(scope) => Some(scope),
+                        Err(_) => {
+                            tracing::warn!(
+                                token_id = %token_row.token_id,
+                                invalid_scope = %s,
+                                "Token contains invalid scope, ignoring"
+                            );
+                            None
+                        }
+                    }
+                })
                 .collect();
 
             let token = Token {

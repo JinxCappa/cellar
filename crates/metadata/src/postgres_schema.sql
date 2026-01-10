@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_refcount ON chunks(refcount, created_at);
 
+-- Per-cache chunk references for tenant-isolated garbage collection.
+-- The global chunks.refcount is the sum of all per-cache refcounts.
+-- GC operations use this table to scope reference counting by cache_id.
+CREATE TABLE IF NOT EXISTS cache_chunk_refs (
+    cache_id UUID,
+    chunk_hash TEXT NOT NULL,
+    refcount INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Use COALESCE for NULL cache_id (public cache) in composite primary key
+    PRIMARY KEY (COALESCE(cache_id, '00000000-0000-0000-0000-000000000000'::UUID), chunk_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_cache_chunk_refs_chunk ON cache_chunk_refs(chunk_hash);
+CREATE INDEX IF NOT EXISTS idx_cache_chunk_refs_refcount ON cache_chunk_refs(cache_id, refcount) WHERE refcount = 0;
+
 -- Manifests
 CREATE TABLE IF NOT EXISTS manifests (
     manifest_hash TEXT PRIMARY KEY,
