@@ -386,8 +386,8 @@ mod sqlite_impl {
             cache_id: Option<Uuid>,
             chunk_hash: &str,
         ) -> MetadataResult<()> {
-            // SQLite doesn't support multi-statement transactions the same way,
-            // so we do the operations sequentially
+            // Use a transaction to ensure atomicity of both operations
+            let mut tx = self.pool.begin().await?;
 
             // Upsert per-cache reference count
             sqlx::query(
@@ -400,15 +400,16 @@ mod sqlite_impl {
             )
             .bind(cache_id)
             .bind(chunk_hash)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
             // Increment global refcount
             sqlx::query("UPDATE chunks SET refcount = refcount + 1 WHERE chunk_hash = ?")
                 .bind(chunk_hash)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
+            tx.commit().await?;
             Ok(())
         }
 
@@ -417,27 +418,37 @@ mod sqlite_impl {
             cache_id: Option<Uuid>,
             chunk_hash: &str,
         ) -> MetadataResult<()> {
+            // Use a transaction to ensure atomicity of both operations
+            let mut tx = self.pool.begin().await?;
+
             // Decrement per-cache reference count (prevent going below 0)
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 UPDATE cache_chunk_refs
-                SET refcount = MAX(0, refcount - 1)
+                SET refcount = refcount - 1
                 WHERE (cache_id = ? OR (? IS NULL AND cache_id IS NULL))
                   AND chunk_hash = ?
+                  AND refcount > 0
                 "#,
             )
             .bind(cache_id)
             .bind(cache_id)
             .bind(chunk_hash)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
-            // Decrement global refcount
-            sqlx::query("UPDATE chunks SET refcount = MAX(0, refcount - 1) WHERE chunk_hash = ?")
+            // Only decrement global refcount if the per-cache decrement actually affected a row.
+            // This prevents desync when the per-cache ref doesn't exist or is already 0.
+            if result.rows_affected() > 0 {
+                sqlx::query(
+                    "UPDATE chunks SET refcount = refcount - 1 WHERE chunk_hash = ? AND refcount > 0",
+                )
                 .bind(chunk_hash)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
+            }
 
+            tx.commit().await?;
             Ok(())
         }
 

@@ -450,7 +450,7 @@ impl ChunkRepo for PostgresStore {
         let mut tx = self.pool.begin().await?;
 
         // Decrement per-cache reference count (prevent going below 0)
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE cache_chunk_refs
             SET refcount = refcount - 1
@@ -464,11 +464,16 @@ impl ChunkRepo for PostgresStore {
         .execute(&mut *tx)
         .await?;
 
-        // Decrement global refcount
-        sqlx::query("UPDATE chunks SET refcount = refcount - 1 WHERE chunk_hash = $1 AND refcount > 0")
+        // Only decrement global refcount if the per-cache decrement actually affected a row.
+        // This prevents desync when the per-cache ref doesn't exist or is already 0.
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                "UPDATE chunks SET refcount = refcount - 1 WHERE chunk_hash = $1 AND refcount > 0",
+            )
             .bind(chunk_hash)
             .execute(&mut *tx)
             .await?;
+        }
 
         tx.commit().await?;
         Ok(())
