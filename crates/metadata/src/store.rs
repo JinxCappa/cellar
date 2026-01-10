@@ -443,10 +443,12 @@ mod sqlite_impl {
             &self,
             manifest: &ManifestRow,
             chunks: &[ManifestChunkRow],
-        ) -> MetadataResult<()> {
-            sqlx::query(
+        ) -> MetadataResult<bool> {
+            // Use INSERT OR IGNORE to handle concurrent creates atomically.
+            // This eliminates the TOCTOU race condition from check-then-insert.
+            let result = sqlx::query(
                 r#"
-                INSERT INTO manifests (manifest_hash, chunk_size, chunk_count, nar_size, object_key, created_at)
+                INSERT OR IGNORE INTO manifests (manifest_hash, chunk_size, chunk_count, nar_size, object_key, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 "#,
             )
@@ -459,6 +461,12 @@ mod sqlite_impl {
             .execute(&self.pool)
             .await?;
 
+            // If no rows were affected, the manifest already exists
+            if result.rows_affected() == 0 {
+                return Ok(false);
+            }
+
+            // Manifest was created, now insert chunk mappings
             for chunk in chunks {
                 sqlx::query(
                     "INSERT INTO manifest_chunks (manifest_hash, position, chunk_hash) VALUES (?, ?, ?)",
@@ -470,7 +478,7 @@ mod sqlite_impl {
                 .await?;
             }
 
-            Ok(())
+            Ok(true)
         }
 
         async fn get_manifest(&self, manifest_hash: &str) -> MetadataResult<Option<ManifestRow>> {
@@ -525,11 +533,15 @@ mod sqlite_impl {
         }
 
         async fn get_orphaned_manifests(&self, limit: u32) -> MetadataResult<Vec<ManifestRow>> {
+            // Only count visible store paths as references. Failed/pending paths should not
+            // prevent GC of manifests, as they represent incomplete or failed uploads.
             let rows = sqlx::query_as::<_, ManifestRow>(
                 r#"
                 SELECT m.* FROM manifests m
                 LEFT JOIN store_paths sp ON m.manifest_hash = sp.manifest_hash
+                    AND sp.visibility_state = 'visible'
                 WHERE sp.store_path_hash IS NULL
+                ORDER BY m.created_at
                 LIMIT ?
                 "#,
             )
@@ -982,6 +994,26 @@ mod sqlite_impl {
                 }
             }
             Ok(())
+        }
+
+        async fn delete_failed_store_paths_older_than(
+            &self,
+            age_seconds: i64,
+        ) -> MetadataResult<u64> {
+            // Delete failed store paths that are older than the specified age.
+            // This allows a grace period for debugging before cleanup.
+            // SQLite uses datetime() function instead of PostgreSQL's interval syntax.
+            let result = sqlx::query(
+                r#"
+                DELETE FROM store_paths
+                WHERE visibility_state = 'failed'
+                  AND committed_at < datetime('now', '-' || ? || ' seconds')
+                "#,
+            )
+            .bind(age_seconds)
+            .execute(&self.pool)
+            .await?;
+            Ok(result.rows_affected())
         }
     }
 

@@ -8,11 +8,14 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait ManifestRepo: Send + Sync {
     /// Create a manifest with its chunk mappings.
+    ///
+    /// Returns `Ok(true)` if the manifest was created, `Ok(false)` if it already existed.
+    /// This uses INSERT ON CONFLICT DO NOTHING to handle concurrent creates atomically.
     async fn create_manifest(
         &self,
         manifest: &ManifestRow,
         chunks: &[ManifestChunkRow],
-    ) -> MetadataResult<()>;
+    ) -> MetadataResult<bool>;
 
     /// Get a manifest by hash.
     async fn get_manifest(&self, manifest_hash: &str) -> MetadataResult<Option<ManifestRow>>;

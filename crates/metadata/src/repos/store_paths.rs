@@ -112,4 +112,12 @@ pub trait StorePathRepo: Send + Sync {
         cache_id: Option<Uuid>,
         store_path_hash: &str,
     ) -> MetadataResult<()>;
+
+    /// Delete failed store paths older than the specified duration.
+    /// Returns the number of deleted store paths.
+    /// This is used by GC to clean up failed uploads after a grace period.
+    async fn delete_failed_store_paths_older_than(
+        &self,
+        age_seconds: i64,
+    ) -> MetadataResult<u64>;
 }
