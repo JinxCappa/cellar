@@ -150,8 +150,18 @@ pub async fn get_nar(
             let extension = compression.extension();
             let nar_key = format!("nar/{}.nar{}", hash, extension);
 
-            match state.storage.get(&nar_key).await {
-                Ok(data) => {
+            // Use streaming to avoid loading entire compressed file into memory.
+            // First get metadata for Content-Length header.
+            match state.storage.head(&nar_key).await {
+                Ok(meta) => {
+                    // Stream directly from storage to HTTP response
+                    let stream = state.storage.get_stream(&nar_key).await?;
+                    let body_stream = stream.map(|result| {
+                        result.map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        })
+                    });
+
                     let content_type = match compression {
                         cellar_core::narinfo::Compression::Zstd => "application/zstd",
                         cellar_core::narinfo::Compression::Xz => "application/x-xz",
@@ -164,9 +174,9 @@ pub async fn get_nar(
                         StatusCode::OK,
                         [
                             (CONTENT_TYPE, content_type),
-                            (CONTENT_LENGTH, &data.len().to_string()),
+                            (CONTENT_LENGTH, &meta.size.to_string()),
                         ],
-                        Body::from(data),
+                        Body::from_stream(body_stream),
                     )
                         .into_response());
                 }

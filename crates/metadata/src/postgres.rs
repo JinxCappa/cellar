@@ -473,11 +473,18 @@ impl ManifestRepo for PostgresStore {
         &self,
         manifest: &ManifestRow,
         chunks: &[ManifestChunkRow],
-    ) -> MetadataResult<()> {
-        sqlx::query(
+    ) -> MetadataResult<bool> {
+        // Use a transaction to ensure atomicity: both the manifest and all its
+        // chunk mappings are inserted together, or neither is.
+        let mut tx = self.pool.begin().await?;
+
+        // Use ON CONFLICT DO NOTHING to handle concurrent creates atomically.
+        // This eliminates the TOCTOU race condition from check-then-insert.
+        let result = sqlx::query(
             r#"
             INSERT INTO manifests (manifest_hash, chunk_size, chunk_count, nar_size, object_key, created_at)
             VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (manifest_hash) DO NOTHING
             "#,
         )
         .bind(&manifest.manifest_hash)
@@ -486,9 +493,16 @@ impl ManifestRepo for PostgresStore {
         .bind(manifest.nar_size)
         .bind(&manifest.object_key)
         .bind(manifest.created_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        // If no rows were affected, the manifest already exists
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        // Manifest was created, now insert chunk mappings
         for chunk in chunks {
             sqlx::query(
                 "INSERT INTO manifest_chunks (manifest_hash, position, chunk_hash) VALUES ($1, $2, $3)",
@@ -496,10 +510,12 @@ impl ManifestRepo for PostgresStore {
             .bind(&chunk.manifest_hash)
             .bind(chunk.position)
             .bind(&chunk.chunk_hash)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
-        Ok(())
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn get_manifest(&self, manifest_hash: &str) -> MetadataResult<Option<ManifestRow>> {
@@ -554,10 +570,13 @@ impl ManifestRepo for PostgresStore {
     }
 
     async fn get_orphaned_manifests(&self, limit: u32) -> MetadataResult<Vec<ManifestRow>> {
+        // Only count visible store paths as references. Failed/pending paths should not
+        // prevent GC of manifests, as they represent incomplete or failed uploads.
         let rows = sqlx::query_as::<_, ManifestRow>(
             r#"
             SELECT m.* FROM manifests m
             LEFT JOIN store_paths sp ON sp.manifest_hash = m.manifest_hash
+                AND sp.visibility_state = 'visible'
             WHERE sp.manifest_hash IS NULL
             ORDER BY m.created_at
             LIMIT $1
@@ -1008,6 +1027,26 @@ impl StorePathRepo for PostgresStore {
             }
         }
         Ok(())
+    }
+
+    async fn delete_failed_store_paths_older_than(
+        &self,
+        age_seconds: i64,
+    ) -> MetadataResult<u64> {
+        // Delete failed store paths that are older than the specified age.
+        // This allows a grace period for debugging before cleanup.
+        // Use COALESCE to handle NULL committed_at (failed uploads that never completed).
+        let result = sqlx::query(
+            r#"
+            DELETE FROM store_paths
+            WHERE visibility_state = 'failed'
+              AND COALESCE(committed_at, created_at) < NOW() - INTERVAL '1 second' * $1
+            "#,
+        )
+        .bind(age_seconds)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 
