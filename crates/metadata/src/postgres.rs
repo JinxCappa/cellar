@@ -1028,11 +1028,12 @@ impl StorePathRepo for PostgresStore {
     ) -> MetadataResult<u64> {
         // Delete failed store paths that are older than the specified age.
         // This allows a grace period for debugging before cleanup.
+        // Use COALESCE to handle NULL committed_at (failed uploads that never completed).
         let result = sqlx::query(
             r#"
             DELETE FROM store_paths
             WHERE visibility_state = 'failed'
-              AND committed_at < NOW() - INTERVAL '1 second' * $1
+              AND COALESCE(committed_at, created_at) < NOW() - INTERVAL '1 second' * $1
             "#,
         )
         .bind(age_seconds)
