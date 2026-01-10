@@ -737,6 +737,18 @@ pub async fn commit_upload(
     // Validate that total bytes matches declared nar_size
     let expected_nar_size = session.nar_size as u64;
     if total_bytes_read != expected_nar_size {
+        // Clean up streaming compressor's temp data on validation failure
+        if let Some(comp) = streaming_compressor {
+            if let Err(e) = comp.abort().await {
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    key = %temp_nar_key,
+                    error = %e,
+                    trace_id = %trace_id,
+                    "Failed to abort streaming compressor after size mismatch"
+                );
+            }
+        }
         record_upload_error("nar_size_mismatch");
         tracing::warn!(
             upload_id = %upload_id,
@@ -753,6 +765,18 @@ pub async fn commit_upload(
 
     let actual_nar_hash = nar_hasher.finalize();
     if actual_nar_hash != expected_nar_hash {
+        // Clean up streaming compressor's temp data on validation failure
+        if let Some(comp) = streaming_compressor {
+            if let Err(e) = comp.abort().await {
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    key = %temp_nar_key,
+                    error = %e,
+                    trace_id = %trace_id,
+                    "Failed to abort streaming compressor after hash mismatch"
+                );
+            }
+        }
         record_upload_error("nar_hash_mismatch");
         tracing::warn!(
             upload_id = %upload_id,
