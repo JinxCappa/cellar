@@ -516,6 +516,7 @@ async fn run_gc_job(
                                 error = %e,
                                 "Failed to decrement chunk refcount"
                             );
+                            stats.errors += 1;
                         }
                     }
 
@@ -529,6 +530,7 @@ async fn run_gc_job(
                                 error = %e,
                                 "Failed to delete manifest from storage"
                             );
+                            stats.errors += 1;
                         }
                     }
 
