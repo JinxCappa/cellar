@@ -331,6 +331,10 @@ pub async fn upload_chunk(
     let auth = require_auth(&req)?;
     auth.require_scope(TokenScope::CacheWrite)?;
 
+    // Normalize chunk hash to lowercase to ensure consistent storage and lookups
+    // from_hex accepts both upper/lowercase, but to_hex always returns lowercase
+    let chunk_hash = chunk_hash.to_lowercase();
+
     let upload_id =
         Uuid::parse_str(&upload_id).map_err(|e| ApiError::BadRequest(format!("invalid upload ID: {e}")))?;
     let expected_hash =
@@ -363,9 +367,6 @@ pub async fn upload_chunk(
     let object_key = expected_hash.to_object_key();
     let storage_exists = state.storage.exists(&object_key).await?;
     let metadata_exists = state.metadata.get_chunk(&chunk_hash).await?.is_some();
-
-    // Track if we need to repair metadata (storage exists but metadata doesn't)
-    let needs_metadata_repair = storage_exists && !metadata_exists;
 
     if storage_exists && metadata_exists {
         // Chunk fully exists in both storage and metadata, just mark as received
@@ -420,9 +421,20 @@ pub async fn upload_chunk(
     let chunk_size = chunk_data.len() as u64;
     let was_new = state.storage.put_if_not_exists(&object_key, chunk_data.clone()).await?;
 
-    // Record chunk in metadata (also handles repair when storage exists but metadata doesn't)
+    // Determine if we need to upsert metadata. We need to do this if:
+    // 1. We just created new storage (was_new = true), OR
+    // 2. Storage already existed but metadata is missing (repair case)
+    // IMPORTANT: Check metadata existence AFTER put_if_not_exists to avoid TOCTOU race.
     let now = OffsetDateTime::now_utc();
-    if was_new || needs_metadata_repair {
+    let needs_metadata_upsert = if was_new {
+        // We just created the storage, so we definitely need to create metadata
+        true
+    } else {
+        // Storage already existed. Check if metadata exists (may have been created by another thread)
+        state.metadata.get_chunk(&chunk_hash).await?.is_none()
+    };
+
+    if was_new || needs_metadata_upsert {
         let chunk_row = ChunkRow {
             chunk_hash: chunk_hash.clone(),
             size_bytes: chunk_size as i64,
@@ -456,7 +468,7 @@ pub async fn upload_chunk(
             return Err(e.into());
         }
 
-        if needs_metadata_repair {
+        if needs_metadata_upsert {
             tracing::info!(
                 upload_id = %upload_id,
                 chunk_hash = %chunk_hash,
@@ -525,6 +537,8 @@ struct CommitArtifacts {
     cache_id: Option<Uuid>,
     /// Whether this was a re-upload (existing visible path).
     is_reupload: bool,
+    /// Chunk hashes with incremented refcounts (for rollback on failure).
+    incremented_refcounts: Vec<String>,
 }
 
 impl CommitArtifacts {
@@ -536,12 +550,42 @@ impl CommitArtifacts {
             store_path_hash: None,
             cache_id: None,
             is_reupload: false,
+            incremented_refcounts: Vec::new(),
         }
     }
 
     /// Clean up artifacts on commit failure.
     /// This is a best-effort cleanup - failures are logged but don't propagate.
     async fn cleanup(&self, state: &AppState, upload_id: Uuid, trace_id: &str) {
+        // Mark session as failed so it can be cleaned up by GC
+        // This prevents sessions from being stuck in 'committing' state forever
+        if let Err(e) = state.metadata.fail_session(
+            upload_id,
+            "commit_failed",
+            Some("Commit operation failed during artifact creation"),
+            OffsetDateTime::now_utc(),
+        ).await {
+            tracing::warn!(
+                upload_id = %upload_id,
+                error = %e,
+                trace_id = %trace_id,
+                "Failed to mark session as failed after commit failure"
+            );
+        }
+
+        // Rollback incremented refcounts to prevent orphaned chunks
+        for chunk_hash in &self.incremented_refcounts {
+            if let Err(e) = state.metadata.decrement_refcount(chunk_hash).await {
+                tracing::warn!(
+                    upload_id = %upload_id,
+                    chunk_hash = %chunk_hash,
+                    error = %e,
+                    trace_id = %trace_id,
+                    "Failed to rollback chunk refcount after commit failure"
+                );
+            }
+        }
+
         // Delete compressed NAR if it was stored
         if let Some(key) = &self.compressed_nar_key {
             if let Err(e) = state.storage.delete(key).await {
@@ -582,27 +626,26 @@ impl CommitArtifacts {
         }
 
         // Handle store path visibility on failure.
-        // Require both store_path_hash AND cache_id to be Some to avoid updating
-        // unintended rows where cache_id IS NULL
-        if let (Some(hash), Some(cache_id)) = (&self.store_path_hash, self.cache_id) {
+        // Update visibility for both tenant caches (cache_id = Some) and public cache (cache_id = None)
+        if let Some(hash) = &self.store_path_hash {
             if self.is_reupload {
-                // For reuploads: revert from "pending_reupload" back to "visible".
-                // This ensures the original content remains accessible.
-                if let Err(e) = state.metadata.update_visibility(Some(cache_id), hash, "visible").await {
-                    tracing::warn!(
-                        upload_id = %upload_id,
-                        store_path_hash = %hash,
-                        error = %e,
-                        trace_id = %trace_id,
-                        "Failed to revert store path to visible after reupload failure"
-                    );
-                }
+                // For reuploads: path already remains 'visible' with old metadata (no action needed).
+                // The create_store_path UPSERT preserves visibility='visible' during reuploads,
+                // so the original content continues to be served. No cleanup required.
+                tracing::debug!(
+                    upload_id = %upload_id,
+                    store_path_hash = %hash,
+                    cache_id = ?self.cache_id,
+                    trace_id = %trace_id,
+                    "Reupload failed, but original content remains visible (no state change)"
+                );
             } else {
                 // For new uploads: mark as failed
-                if let Err(e) = state.metadata.update_visibility(Some(cache_id), hash, "failed").await {
+                if let Err(e) = state.metadata.update_visibility(self.cache_id, hash, "failed").await {
                     tracing::warn!(
                         upload_id = %upload_id,
                         store_path_hash = %hash,
+                        cache_id = ?self.cache_id,
                         error = %e,
                         trace_id = %trace_id,
                         "Failed to mark store path as failed after commit failure"
@@ -637,26 +680,53 @@ pub async fn commit_upload(
             .map_err(|e| ApiError::BadRequest(format!("invalid JSON: {e}")))?
     };
 
-    // Get session
+    // Atomically get session with exclusive lock and transition to 'committing' state.
+    // This prevents concurrent commits from both seeing state='open' and proceeding.
+    // The operation is atomic (wrapped in a transaction), ensuring only one commit succeeds.
+    let now = OffsetDateTime::now_utc();
     let session = state
         .metadata
-        .get_session(upload_id)
+        .begin_commit_session(upload_id, now)
         .await?
         .ok_or_else(|| ApiError::NotFound("upload session not found".to_string()))?;
 
-    // Verify ownership
-    verify_session_ownership(&auth, &session)?;
-
-    if session.state != "open" {
+    // Check state - should be 'committing' if transition succeeded
+    // begin_commit_session only transitions from 'open' -> 'committing'
+    if session.state != "committing" {
+        // Session was not in 'open' state, so transition didn't happen
+        // No need to call fail_session since state wasn't changed
         return Err(ApiError::BadRequest(format!(
             "upload session is {}, not open",
             session.state
         )));
     }
 
-    if session.expires_at < OffsetDateTime::now_utc() {
+    // CRITICAL: After this point, session is in 'committing' state.
+    // All error paths MUST call fail_session to prevent DoS (session stuck in committing forever).
+
+    // Verify ownership - MUST fail_session on error since we're now in 'committing' state
+    if let Err(e) = verify_session_ownership(&auth, &session) {
+        let _ = state.metadata.fail_session(
+            upload_id,
+            "unauthorized",
+            Some("Ownership verification failed after state transition"),
+            OffsetDateTime::now_utc(),
+        ).await;
+        return Err(e);
+    }
+
+    // Check expiry - MUST fail_session on error since we're now in 'committing' state
+    if session.expires_at < now {
+        let _ = state.metadata.fail_session(
+            upload_id,
+            "expired",
+            Some("Session expired after state transition"),
+            OffsetDateTime::now_utc(),
+        ).await;
         return Err(ApiError::UploadExpired);
     }
+
+    // Session is now in 'committing' state (atomically transitioned)
 
     // Parse chunk hashes
     let chunk_hashes: Vec<ChunkHash> = body
@@ -675,6 +745,13 @@ pub async fn commit_upload(
             trace_id = %trace_id,
             "Commit failed: upload incomplete"
         );
+        // Mark session as failed
+        let _ = state.metadata.fail_session(
+            upload_id,
+            "incomplete_upload",
+            Some(&format!("{} chunks missing", missing.len())),
+            OffsetDateTime::now_utc(),
+        ).await;
         return Err(ApiError::IncompleteUpload {
             missing: missing.len(),
         });
@@ -773,6 +850,13 @@ pub async fn commit_upload(
             trace_id = %trace_id,
             "Commit failed: NAR size mismatch"
         );
+        // Mark session as failed
+        let _ = state.metadata.fail_session(
+            upload_id,
+            "nar_size_mismatch",
+            Some(&format!("Expected {} bytes but got {}", expected_nar_size, total_bytes_read)),
+            OffsetDateTime::now_utc(),
+        ).await;
         return Err(ApiError::BadRequest(format!(
             "NAR size mismatch: declared {} bytes but chunks total {} bytes",
             expected_nar_size, total_bytes_read
@@ -801,6 +885,13 @@ pub async fn commit_upload(
             trace_id = %trace_id,
             "Commit failed: NAR hash mismatch"
         );
+        // Mark session as failed
+        let _ = state.metadata.fail_session(
+            upload_id,
+            "nar_hash_mismatch",
+            Some(&format!("Expected {} but got {}", expected_nar_hash.to_sri(), actual_nar_hash.to_sri())),
+            OffsetDateTime::now_utc(),
+        ).await;
         return Err(ApiError::HashMismatch {
             expected: expected_nar_hash.to_sri(),
             actual: actual_nar_hash.to_sri(),
@@ -814,6 +905,13 @@ pub async fn commit_upload(
     if let Some(expected) = &session.manifest_hash {
         let expected_hash = ManifestHash::from_hex(expected)?;
         if manifest_hash != expected_hash {
+            // Mark session as failed since we're in 'committing' state
+            let _ = state.metadata.fail_session(
+                upload_id,
+                "manifest_hash_mismatch",
+                Some(&format!("Expected {} but got {}", expected, manifest_hash.to_hex())),
+                OffsetDateTime::now_utc(),
+            ).await;
             return Err(ApiError::HashMismatch {
                 expected: expected.clone(),
                 actual: manifest_hash.to_hex(),
@@ -823,6 +921,22 @@ pub async fn commit_upload(
 
     let now = OffsetDateTime::now_utc();
     let store_path = StorePath::parse(&session.store_path)?;
+
+    // Initialize artifact tracker for compensation on failure (early to avoid scope issues)
+    let mut artifacts = CommitArtifacts::new();
+
+    // Helper macro to run cleanup on error (defined early to avoid scope issues)
+    macro_rules! try_with_cleanup {
+        ($expr:expr) => {
+            match $expr {
+                Ok(val) => val,
+                Err(e) => {
+                    artifacts.cleanup(&state, upload_id, &trace_id.0).await;
+                    return Err(e.into());
+                }
+            }
+        };
+    }
 
     // Create manifest using atomic INSERT ON CONFLICT DO NOTHING.
     // This eliminates the TOCTOU race condition from the previous check-then-insert pattern.
@@ -854,23 +968,28 @@ pub async fn commit_upload(
     // If the manifest already existed, these operations were already done.
     if manifest_created {
         // Increment refcounts for all chunks
+        // Track incremented refcounts in artifacts for rollback on failure
         for hash in &chunk_hashes {
-            state.metadata.increment_refcount(&hash.to_hex()).await?;
+            let hex_hash = hash.to_hex();
+            try_with_cleanup!(state.metadata.increment_refcount(&hex_hash).await);
+            artifacts.incremented_refcounts.push(hex_hash);
         }
 
         // Store manifest JSON in object store
         let manifest = Manifest::new(chunk_hashes.clone(), session.chunk_size as u64, session.nar_size as u64);
         let manifest_json = manifest.to_json()?;
-        state
-            .storage
-            .put(&manifest_hash.to_object_key(), Bytes::from(manifest_json))
-            .await?;
+        try_with_cleanup!(
+            state
+                .storage
+                .put(&manifest_hash.to_object_key(), Bytes::from(manifest_json))
+                .await
+        );
     }
 
     // Check for existing visible store path to handle re-uploads correctly.
-    // For re-uploads, we use "pending_reupload" state during the commit process,
-    // which allows us to atomically update only after all writes succeed.
-    // The original visible path remains served until we flip to the new content.
+    // For re-uploads, create_store_path preserves both the old metadata AND visibility='visible'.
+    // This ensures the original content continues to be served without 404s during the upload.
+    // Only complete_reupload atomically updates metadata to the new content when commit succeeds.
     let existing = state
         .metadata
         .get_store_path(session.cache_id, store_path.hash().as_str())
@@ -881,32 +1000,17 @@ pub async fn commit_upload(
         .map(|sp| sp.visibility_state == "visible")
         .unwrap_or(false);
 
-    // Use "pending_reupload" for reuploads to avoid exposing inconsistent state.
-    // The original visible content continues to be served until we complete the commit.
-    // On failure, cleanup will revert to "visible" (the original state).
-    let initial_visibility = if is_reupload { "pending_reupload" } else { "pending" };
+    // For new uploads use "pending", for reuploads the UPSERT will preserve "visible".
+    // This prevents 404s during reuploads while keeping old content accessible.
+    let initial_visibility = if is_reupload { "visible" } else { "pending" };
 
     // Preserve original created_at for re-uploads
     let created_at = existing.as_ref().map(|e| e.created_at).unwrap_or(now);
 
-    // Initialize artifact tracker for compensation on failure
-    let mut artifacts = CommitArtifacts::new();
+    // Set artifact tracking fields now that we have computed is_reupload
     artifacts.is_reupload = is_reupload;
     artifacts.cache_id = session.cache_id;
     artifacts.store_path_hash = Some(store_path.hash().to_string());
-
-    // Helper macro to run cleanup on error
-    macro_rules! try_with_cleanup {
-        ($expr:expr) => {
-            match $expr {
-                Ok(val) => val,
-                Err(e) => {
-                    artifacts.cleanup(&state, upload_id, &trace_id.0).await;
-                    return Err(e.into());
-                }
-            }
-        };
-    }
 
     // Create store path record (scoped to cache_id for tenant isolation)
     let store_path_row = StorePathRow {
@@ -1001,12 +1105,28 @@ pub async fn commit_upload(
 
     // Now that all storage operations succeeded, make the store path visible.
     // This is the "commit point" - only now can clients see and download this path.
-    try_with_cleanup!(
-        state
-            .metadata
-            .update_visibility(session.cache_id, store_path.hash().as_str(), "visible")
-            .await
-    );
+    // For reuploads, use complete_reupload to atomically update both visibility and metadata.
+    if artifacts.is_reupload {
+        try_with_cleanup!(
+            state
+                .metadata
+                .complete_reupload(
+                    session.cache_id,
+                    store_path.hash().as_str(),
+                    &session.nar_hash,
+                    session.nar_size,
+                    &manifest_hash.to_hex(),
+                )
+                .await
+        );
+    } else {
+        try_with_cleanup!(
+            state
+                .metadata
+                .update_visibility(session.cache_id, store_path.hash().as_str(), "visible")
+                .await
+        );
+    }
 
     // Mark session as committed (bookkeeping only - upload is already complete)
     // If this fails, we log a warning but don't cleanup since data is already visible

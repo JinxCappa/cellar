@@ -120,6 +120,56 @@ impl UploadRepo for PostgresStore {
         Ok(row)
     }
 
+    async fn get_session_for_commit(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>> {
+        // SELECT FOR UPDATE acquires an exclusive row lock, preventing concurrent commits
+        // on the same upload_id. The lock is held until the transaction commits/rolls back.
+        let row = sqlx::query_as::<_, UploadSessionRow>(
+            "SELECT * FROM upload_sessions WHERE upload_id = $1 FOR UPDATE",
+        )
+        .bind(upload_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn begin_commit_session(&self, upload_id: Uuid, updated_at: OffsetDateTime) -> MetadataResult<Option<UploadSessionRow>> {
+        // Atomically get session with FOR UPDATE lock and transition to 'committing' state.
+        // This prevents the race condition where two commits both see state='open' and proceed.
+        // Only transitions if current state is 'open'.
+        let mut tx = self.pool.begin().await?;
+
+        // Get session with exclusive lock
+        let mut session = sqlx::query_as::<_, UploadSessionRow>(
+            "SELECT * FROM upload_sessions WHERE upload_id = $1 FOR UPDATE",
+        )
+        .bind(upload_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(ref mut s) = session {
+            if s.state == "open" {
+                // Only update state if currently 'open'
+                let result = sqlx::query("UPDATE upload_sessions SET state = $1, updated_at = $2 WHERE upload_id = $3 AND state = 'open'")
+                    .bind("committing")
+                    .bind(updated_at)
+                    .bind(upload_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                // Update the session object if the UPDATE succeeded
+                if result.rows_affected() > 0 {
+                    s.state = "committing".to_string();
+                    s.updated_at = updated_at;
+                }
+            }
+        }
+
+        tx.commit().await?;
+
+        // Return session (state will be 'committing' if transition succeeded, original state otherwise)
+        Ok(session)
+    }
+
     async fn get_session_by_store_path(
         &self,
         cache_id: Option<Uuid>,
@@ -493,8 +543,10 @@ impl ChunkRepo for PostgresStore {
         older_than: OffsetDateTime,
         limit: u32,
     ) -> MetadataResult<Vec<ChunkRow>> {
-        // Exclude chunks that are part of open upload sessions to prevent
+        // Exclude chunks that are part of open OR committing upload sessions to prevent
         // GC from deleting chunks for in-progress uploads (which temporarily have refcount=0).
+        // CRITICAL: Must exclude 'committing' state to prevent race where GC deletes chunks
+        // mid-commit before refcounts are incremented.
         let rows = sqlx::query_as::<_, ChunkRow>(
             r#"
             SELECT * FROM chunks
@@ -503,7 +555,7 @@ impl ChunkRepo for PostgresStore {
               AND chunk_hash NOT IN (
                 SELECT uec.chunk_hash FROM upload_expected_chunks uec
                 INNER JOIN upload_sessions us ON uec.upload_id = us.upload_id
-                WHERE us.state = 'open'
+                WHERE us.state IN ('open', 'committing')
               )
             ORDER BY created_at
             LIMIT $2
@@ -653,18 +705,24 @@ impl ManifestRepo for PostgresStore {
     }
 
     async fn get_orphaned_manifests(&self, limit: u32) -> MetadataResult<Vec<ManifestRow>> {
-        // Only count visible store paths as references. Failed/pending paths should not
-        // prevent GC of manifests, as they represent incomplete or failed uploads.
+        // Count visible, pending, and pending_reupload store paths as references.
+        // Only failed/aborted uploads should not prevent GC of manifests.
+        // CRITICAL: Add grace period to prevent race where manifest is created but store_path
+        // not yet created during commit. Don't GC manifests created in last 10 minutes.
+        // This prevents GC from running in the window between create_manifest and create_store_path.
+        let grace_period = OffsetDateTime::now_utc() - time::Duration::minutes(10);
         let rows = sqlx::query_as::<_, ManifestRow>(
             r#"
             SELECT m.* FROM manifests m
             LEFT JOIN store_paths sp ON sp.manifest_hash = m.manifest_hash
-                AND sp.visibility_state = 'visible'
+                AND sp.visibility_state IN ('visible', 'pending', 'pending_reupload')
             WHERE sp.manifest_hash IS NULL
+              AND m.created_at < $1
             ORDER BY m.created_at
-            LIMIT $1
+            LIMIT $2
             "#,
         )
+        .bind(grace_period)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -678,6 +736,9 @@ impl StorePathRepo for PostgresStore {
         // Use UPSERT with the unique index on (COALESCE(cache_id, '00000000-...'), store_path_hash).
         // CRITICAL: cache_id is NOT updated on conflict - this prevents tenant hijacking where
         // an attacker could overwrite another tenant's store path by uploading the same hash.
+        // CRITICAL: For reuploads (visibility_state='visible'), preserve BOTH metadata AND visibility
+        // to prevent 404s during reupload. The path stays 'visible' serving old content until
+        // complete_reupload atomically updates both metadata and confirms visibility.
         sqlx::query(
             r#"
             INSERT INTO store_paths (
@@ -685,11 +746,23 @@ impl StorePathRepo for PostgresStore {
                 created_at, committed_at, visibility_state, uploader_token_id, ca
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (COALESCE(cache_id, '00000000-0000-0000-0000-000000000000'::UUID), store_path_hash) DO UPDATE SET
-                nar_hash = EXCLUDED.nar_hash,
-                nar_size = EXCLUDED.nar_size,
-                manifest_hash = EXCLUDED.manifest_hash,
+                nar_hash = CASE
+                    WHEN store_paths.visibility_state = 'visible' THEN store_paths.nar_hash
+                    ELSE EXCLUDED.nar_hash
+                END,
+                nar_size = CASE
+                    WHEN store_paths.visibility_state = 'visible' THEN store_paths.nar_size
+                    ELSE EXCLUDED.nar_size
+                END,
+                manifest_hash = CASE
+                    WHEN store_paths.visibility_state = 'visible' THEN store_paths.manifest_hash
+                    ELSE EXCLUDED.manifest_hash
+                END,
                 committed_at = EXCLUDED.committed_at,
-                visibility_state = EXCLUDED.visibility_state,
+                visibility_state = CASE
+                    WHEN store_paths.visibility_state = 'visible' THEN 'visible'
+                    ELSE EXCLUDED.visibility_state
+                END,
                 ca = EXCLUDED.ca
             "#,
         )
@@ -787,6 +860,43 @@ impl StorePathRepo for PostgresStore {
                     .bind(store_path_hash)
                     .execute(&self.pool)
                     .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn complete_reupload(
+        &self,
+        cache_id: Option<Uuid>,
+        store_path_hash: &str,
+        nar_hash: &str,
+        nar_size: i64,
+        manifest_hash: &str,
+    ) -> MetadataResult<()> {
+        // Atomically update visibility and metadata for successful reupload
+        match cache_id {
+            Some(id) => {
+                sqlx::query(
+                    "UPDATE store_paths SET visibility_state = 'visible', nar_hash = $1, nar_size = $2, manifest_hash = $3 WHERE cache_id = $4 AND store_path_hash = $5"
+                )
+                .bind(nar_hash)
+                .bind(nar_size)
+                .bind(manifest_hash)
+                .bind(id)
+                .bind(store_path_hash)
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE store_paths SET visibility_state = 'visible', nar_hash = $1, nar_size = $2, manifest_hash = $3 WHERE cache_id IS NULL AND store_path_hash = $4"
+                )
+                .bind(nar_hash)
+                .bind(nar_size)
+                .bind(manifest_hash)
+                .bind(store_path_hash)
+                .execute(&self.pool)
+                .await?;
             }
         }
         Ok(())

@@ -137,6 +137,62 @@ mod sqlite_impl {
             Ok(row)
         }
 
+        async fn get_session_for_commit(&self, upload_id: Uuid) -> MetadataResult<Option<UploadSessionRow>> {
+            // SQLite doesn't support SELECT FOR UPDATE, but it uses database-level locking.
+            // Concurrency protection is achieved by the commit handler immediately performing
+            // a write operation (update_state to "committing") after this read, which:
+            // 1. Acquires SQLite's write lock (RESERVED -> EXCLUSIVE)
+            // 2. Prevents concurrent commits from proceeding (state check will fail)
+            // 3. Ensures only one commit can succeed per upload_id
+            //
+            // This pattern is equivalent to PostgreSQL's FOR UPDATE for the commit use case.
+            let row = sqlx::query_as::<_, UploadSessionRow>(
+                "SELECT * FROM upload_sessions WHERE upload_id = ?",
+            )
+            .bind(upload_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            Ok(row)
+        }
+
+        async fn begin_commit_session(&self, upload_id: Uuid, updated_at: OffsetDateTime) -> MetadataResult<Option<UploadSessionRow>> {
+            // Atomically get session and transition to 'committing' state.
+            // The write operation acquires SQLite's exclusive lock, preventing concurrent commits.
+            // Only transitions if current state is 'open'.
+            let mut tx = self.pool.begin().await?;
+
+            // Get session
+            let mut session = sqlx::query_as::<_, UploadSessionRow>(
+                "SELECT * FROM upload_sessions WHERE upload_id = ?",
+            )
+            .bind(upload_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(ref mut s) = session {
+                if s.state == "open" {
+                    // Only update state if currently 'open'
+                    let result = sqlx::query("UPDATE upload_sessions SET state = ?, updated_at = ? WHERE upload_id = ? AND state = 'open'")
+                        .bind("committing")
+                        .bind(updated_at)
+                        .bind(upload_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                    // Update the session object if the UPDATE succeeded
+                    if result.rows_affected() > 0 {
+                        s.state = "committing".to_string();
+                        s.updated_at = updated_at;
+                    }
+                }
+            }
+
+            tx.commit().await?;
+
+            // Return session (state will be 'committing' if transition succeeded, original state otherwise)
+            Ok(session)
+        }
+
         async fn get_session_by_store_path(
             &self,
             cache_id: Option<Uuid>,
@@ -222,7 +278,8 @@ mod sqlite_impl {
             chunk_hash: &str,
             received_at: OffsetDateTime,
         ) -> MetadataResult<()> {
-            sqlx::query(
+            // Try UPDATE first (for pre-defined expected_chunks)
+            let result = sqlx::query(
                 "UPDATE upload_expected_chunks SET received_at = ? WHERE upload_id = ? AND chunk_hash = ?",
             )
             .bind(received_at)
@@ -230,6 +287,20 @@ mod sqlite_impl {
             .bind(chunk_hash)
             .execute(&self.pool)
             .await?;
+
+            // If UPDATE didn't match any rows, INSERT a new row (for dynamic uploads without expected_chunks)
+            // This matches PostgreSQL behavior and fixes resume/missing endpoints for uploads without pre-defined chunks
+            if result.rows_affected() == 0 {
+                // INSERT with position=-1 as a sentinel for dynamic chunks
+                let _ = sqlx::query(
+                    "INSERT OR IGNORE INTO upload_expected_chunks (upload_id, position, chunk_hash, size_bytes, received_at) VALUES (?, -1, ?, 0, ?)",
+                )
+                .bind(upload_id)
+                .bind(chunk_hash)
+                .bind(received_at)
+                .execute(&self.pool)
+                .await?;
+            }
             Ok(())
         }
 
@@ -761,6 +832,43 @@ mod sqlite_impl {
                         .bind(store_path_hash)
                         .execute(&self.pool)
                         .await?;
+                }
+            }
+            Ok(())
+        }
+
+        async fn complete_reupload(
+            &self,
+            cache_id: Option<Uuid>,
+            store_path_hash: &str,
+            nar_hash: &str,
+            nar_size: i64,
+            manifest_hash: &str,
+        ) -> MetadataResult<()> {
+            // Atomically update visibility and metadata for successful reupload
+            match cache_id {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE store_paths SET visibility_state = 'visible', nar_hash = ?, nar_size = ?, manifest_hash = ? WHERE cache_id = ? AND store_path_hash = ?"
+                    )
+                    .bind(nar_hash)
+                    .bind(nar_size)
+                    .bind(manifest_hash)
+                    .bind(id)
+                    .bind(store_path_hash)
+                    .execute(&self.pool)
+                    .await?;
+                }
+                None => {
+                    sqlx::query(
+                        "UPDATE store_paths SET visibility_state = 'visible', nar_hash = ?, nar_size = ?, manifest_hash = ? WHERE cache_id IS NULL AND store_path_hash = ?"
+                    )
+                    .bind(nar_hash)
+                    .bind(nar_size)
+                    .bind(manifest_hash)
+                    .bind(store_path_hash)
+                    .execute(&self.pool)
+                    .await?;
                 }
             }
             Ok(())

@@ -577,6 +577,30 @@ async fn run_gc_job(
                     }
                 }
             }
+
+            // Also clean up failed store_paths that are older than the grace period.
+            // Failed uploads should be retained for a grace period to allow debugging,
+            // but cleaned up eventually to prevent accumulation.
+            let grace_period_seconds = config.grace_period().whole_seconds();
+            match metadata.delete_failed_store_paths_older_than(grace_period_seconds).await {
+                Ok(deleted_count) => {
+                    stats.items_deleted += deleted_count;
+                    tracing::info!(
+                        job_id = %job_id,
+                        deleted = deleted_count,
+                        grace_period_secs = grace_period_seconds,
+                        "Cleaned up old failed store_paths"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        error = %e,
+                        "Failed to clean up old failed store_paths"
+                    );
+                    stats.errors += 1;
+                }
+            }
         }
     }
 
