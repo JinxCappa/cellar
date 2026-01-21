@@ -44,7 +44,7 @@ The Docker setup includes a pre-configured admin token: `cellar-test-token-12345
 # Build
 cargo build --release
 
-# Generate a bootstrap admin token
+# Generate an admin token
 cargo run --bin cellarctl -- token generate
 # Output:
 #   Secret: <SAVE_THIS_TOKEN>
@@ -52,8 +52,8 @@ cargo run --bin cellarctl -- token generate
 
 # Create config (copy and edit)
 cp config/server.dev.toml config/server.toml
-# Add the hash to [bootstrap] section:
-#   admin_token_hash = "sha256:abc123..."
+# Add the hash to [admin] section:
+#   token_hash = "sha256:abc123..."
 
 # Start server
 ./target/release/cellar-server --config config/server.toml
@@ -64,7 +64,7 @@ cp config/server.dev.toml config/server.toml
 ```bash
 # Set admin credentials
 export CELLAR_SERVER="http://localhost:8080"
-export CELLAR_TOKEN="<your-bootstrap-token>"
+export CELLAR_TOKEN="<your-admin-token>"
 
 # Create your first cache
 cellarctl cache create --name "main" --public --default
@@ -220,7 +220,7 @@ Caches without an explicit domain use the default storage domain.
 ### Token Management
 
 ```bash
-# Generate a bootstrap token (offline)
+# Generate an admin token hash (offline, for config file)
 cellarctl token generate
 
 # Create a read-only token
@@ -377,11 +377,11 @@ path = "./data/storage"
 type = "sqlite"  # or "postgres" for production
 path = "./data/metadata.db"
 
-# Optional bootstrap token (for first admin access)
-# [bootstrap]
-# admin_token_hash = "sha256:abc123..."
-# admin_token_scopes = ["cache:admin"]
-# admin_token_description = "Bootstrap admin token"
+# Admin token (REQUIRED)
+[admin]
+token_hash = "sha256:abc123..."
+# token_scopes = ["cache:admin"]      # Optional, defaults to cache:admin
+# token_description = "Admin token"   # Optional description
 
 # For PostgreSQL:
 # type = "postgres"

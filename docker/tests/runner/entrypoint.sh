@@ -100,8 +100,8 @@ EOF
 
 # Get the pre-configured test token
 create_test_token() {
-    # Use the bootstrap token configured in server.toml
-    # Token value matches the hash in [bootstrap].admin_token_hash
+    # Use the admin token configured in server.toml
+    # Token value matches the hash in [admin].token_hash
     echo "cellar-test-token-12345"
 }
 
