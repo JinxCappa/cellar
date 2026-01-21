@@ -978,9 +978,9 @@ async fn handle_token_generate(description: Option<String>) -> Result<()> {
     if let Some(desc) = description {
         println!("  Description: {desc}");
     }
-    println!("\nAdd to server.toml for bootstrap:");
-    println!("  [bootstrap]");
-    println!("  admin_token_hash = \"sha256:{token_hash}\"");
+    println!("\nAdd to server.toml:");
+    println!("  [admin]");
+    println!("  token_hash = \"sha256:{token_hash}\"");
 
     Ok(())
 }
