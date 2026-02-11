@@ -1547,35 +1547,51 @@ async fn handle_push_command(
     if let Some(flake_ref) = flake.as_deref()
         && !no_preflight
         && !force
-        && let Some(output_paths) = evaluate_flake_output_paths(flake_ref, &nix_args).await
     {
-        println!(
-            "Pre-flight: resolved {} output path(s), checking remote caches...",
-            output_paths.len()
-        );
-        match try_preflight_closure_check(
-            &output_paths,
-            &profile,
-            &upstreams,
-            no_filter,
-            no_closure,
-        )
-        .await
-        {
-            PreflightResult::NothingToPush {
-                total,
-                on_cellar,
-                on_upstream,
-            } => {
-                println!(
-                    "All {total} paths already cached ({on_cellar} on cache, {on_upstream} upstream)"
-                );
-                println!("Nothing to push.");
-                return Ok(());
+        let spinner = tokio::spawn(async {
+            const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let mut i = 0;
+            loop {
+                eprint!("\r{} Pre-flight: evaluating flake outputs...", FRAMES[i]);
+                i = (i + 1) % FRAMES.len();
+                tokio::time::sleep(Duration::from_millis(80)).await;
             }
-            PreflightResult::Inconclusive => {
-                println!("Pre-flight: could not resolve remotely, building...");
+        });
+        let output_paths = evaluate_flake_output_paths(flake_ref, &nix_args).await;
+        spinner.abort();
+        if let Some(output_paths) = output_paths {
+            eprintln!(
+                "\r  Pre-flight: resolved {} path(s), checking remote caches...",
+                output_paths.len()
+            );
+            match try_preflight_closure_check(
+                &output_paths,
+                &profile,
+                &upstreams,
+                no_filter,
+                no_closure,
+            )
+            .await
+            {
+                PreflightResult::NothingToPush {
+                    total,
+                    on_cellar,
+                    on_upstream,
+                } => {
+                    let cache_label = profile.cache_name.as_deref().unwrap_or("cellar");
+                    eprintln!(
+                        "All {total} paths already cached ({on_cellar} on {cache_label}, {on_upstream} upstream)"
+                    );
+                    eprintln!("Nothing to push.");
+                    return Ok(());
+                }
+                PreflightResult::Inconclusive => {
+                    // Progress line from try_preflight_closure_check already
+                    // printed a newline; no extra blank line needed.
+                }
             }
+        } else {
+            eprintln!("\r  Pre-flight: skipped (evaluation failed).{: <20}", "");
         }
     }
 
@@ -1587,9 +1603,9 @@ async fn handle_push_command(
         if no_closure {
             top_level
         } else {
-            println!("Expanding to runtime closure...");
+            eprintln!("Expanding to runtime closure...");
             let closure = expand_to_closure(&top_level).await?;
-            println!(
+            eprintln!(
                 "Closure contains {} paths ({} top-level)",
                 closure.len(),
                 top_level.len()
@@ -2154,12 +2170,12 @@ async fn try_preflight_closure_check(
         }
 
         if !found_all {
-            eprintln!(); // newline after progress
+            eprint!("\r{: <60}\r", ""); // clear progress line
             return PreflightResult::Inconclusive;
         }
     }
 
-    eprintln!(); // newline after progress
+    eprint!("\r{: <60}\r", ""); // clear progress line
     let cellar_count = on_cellar.load(Ordering::Relaxed);
     let upstream_count = on_upstream.load(Ordering::Relaxed);
     PreflightResult::NothingToPush {
@@ -2283,7 +2299,7 @@ async fn filter_upstream_paths(
             Err(_) => {} // JoinError — shouldn't happen; path is lost (fail-open)
         }
     }
-    eprintln!(); // newline after progress
+    eprint!("\r{: <60}\r", ""); // clear progress line
 
     // Preserve original order
     let remaining_set: HashSet<&str> = remaining.iter().map(|s| s.as_str()).collect();
