@@ -1975,12 +1975,25 @@ async fn evaluate_flake_output_paths(flake: &str, nix_args: &[String]) -> Option
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let obj = json.as_object()?;
 
+    // Nix 2.32+ (v3/v4) wraps derivations under a "derivations" key;
+    // older formats put drv paths directly at the top level.
+    let drvs = if let Some(inner) = obj.get("derivations").and_then(|v| v.as_object()) {
+        inner
+    } else {
+        obj
+    };
+
     let mut paths = Vec::new();
-    for (_drv_path, drv_info) in obj {
+    for (_drv_path, drv_info) in drvs {
         let outputs = drv_info.get("outputs")?.as_object()?;
         for (_name, output_info) in outputs {
             if let Some(path) = output_info.get("path").and_then(|p| p.as_str()) {
-                paths.push(path.to_string());
+                // Nix 2.32+ omits the /nix/store/ prefix
+                if path.starts_with("/nix/store/") {
+                    paths.push(path.to_string());
+                } else {
+                    paths.push(format!("/nix/store/{path}"));
+                }
             }
         }
     }
