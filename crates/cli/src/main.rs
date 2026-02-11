@@ -1610,7 +1610,7 @@ async fn handle_push_command(
         let upstream_http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()?;
-        println!(
+        eprintln!(
             "Filtering against {} upstream substituter(s)...",
             upstreams.len()
         );
