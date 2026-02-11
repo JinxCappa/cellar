@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-cli"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-core"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-metadata"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "cellar-core",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-server"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-signer"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "cellar-core",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "cellar-storage"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
