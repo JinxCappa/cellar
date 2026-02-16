@@ -2773,7 +2773,7 @@ fn build_temp_nar_path() -> PathBuf {
 /// Generate a random token secret using cryptographically secure RNG.
 fn generate_token_secret() -> String {
     use base64::Engine;
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
