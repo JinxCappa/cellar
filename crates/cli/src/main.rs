@@ -15,7 +15,7 @@ use figment::providers::{Env, Format, Toml};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -1548,7 +1548,12 @@ async fn handle_push_command(
         && !no_preflight
         && !force
     {
-        let spinner = tokio::spawn(async {
+        let is_tty = std::io::stderr().is_terminal();
+        let spinner = tokio::spawn(async move {
+            if !is_tty {
+                eprintln!("Pre-flight: evaluating flake outputs...");
+                return;
+            }
             const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let mut i = 0;
             loop {
@@ -1560,10 +1565,17 @@ async fn handle_push_command(
         let output_paths = evaluate_flake_output_paths(flake_ref, &nix_args).await;
         spinner.abort();
         if let Some(output_paths) = output_paths {
-            eprintln!(
-                "\r  Pre-flight: resolved {} path(s), checking remote caches...",
-                output_paths.len()
-            );
+            if is_tty {
+                eprintln!(
+                    "\r  Pre-flight: resolved {} path(s), checking remote caches...",
+                    output_paths.len()
+                );
+            } else {
+                eprintln!(
+                    "Pre-flight: resolved {} path(s), checking remote caches...",
+                    output_paths.len()
+                );
+            }
             match try_preflight_closure_check(
                 &output_paths,
                 &profile,
@@ -1590,8 +1602,10 @@ async fn handle_push_command(
                     // printed a newline; no extra blank line needed.
                 }
             }
-        } else {
+        } else if is_tty {
             eprintln!("\r  Pre-flight: skipped (evaluation failed).{: <20}", "");
+        } else {
+            eprintln!("Pre-flight: skipped (evaluation failed).");
         }
     }
 
@@ -2092,11 +2106,15 @@ async fn try_preflight_closure_check(
         }
     }
 
+    let is_tty = std::io::stderr().is_terminal();
+
     // BFS: process in waves for concurrency
     while !queue.is_empty() {
         let wave: Vec<String> = queue.drain(..).collect();
 
-        eprint!("\r  Checking closure: {} paths resolved...", visited.len());
+        if is_tty {
+            eprint!("\r  Checking closure: {} paths resolved...", visited.len());
+        }
 
         let mut futures = FuturesUnordered::new();
         for hash in wave {
@@ -2170,12 +2188,16 @@ async fn try_preflight_closure_check(
         }
 
         if !found_all {
-            eprint!("\r{: <60}\r", ""); // clear progress line
+            if is_tty {
+                eprint!("\r{: <60}\r", ""); // clear progress line
+            }
             return PreflightResult::Inconclusive;
         }
     }
 
-    eprint!("\r{: <60}\r", ""); // clear progress line
+    if is_tty {
+        eprint!("\r{: <60}\r", ""); // clear progress line
+    }
     let cellar_count = on_cellar.load(Ordering::Relaxed);
     let upstream_count = on_upstream.load(Ordering::Relaxed);
     PreflightResult::NothingToPush {
@@ -2249,6 +2271,7 @@ async fn filter_upstream_paths(
     let total = paths.len();
     let done = std::sync::Arc::new(AtomicUsize::new(0));
     let semaphore = std::sync::Arc::new(Semaphore::new(UPSTREAM_CHECK_CONCURRENCY));
+    let is_tty = std::io::stderr().is_terminal();
 
     let mut futures = FuturesUnordered::new();
 
@@ -2267,7 +2290,9 @@ async fn filter_upstream_paths(
                 Err(_) => {
                     // Can't parse → keep the path (fail-open)
                     let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    eprint!("\r  Checking upstream: {completed}/{total}...");
+                    if is_tty {
+                        eprint!("\r  Checking upstream: {completed}/{total}...");
+                    }
                     return (path, false);
                 }
             };
@@ -2285,7 +2310,9 @@ async fn filter_upstream_paths(
             }
 
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            eprint!("\r  Checking upstream: {completed}/{total}...");
+            if is_tty {
+                eprint!("\r  Checking upstream: {completed}/{total}...");
+            }
             (path, found)
         }));
     }
@@ -2299,7 +2326,9 @@ async fn filter_upstream_paths(
             Err(_) => {} // JoinError — shouldn't happen; path is lost (fail-open)
         }
     }
-    eprint!("\r{: <60}\r", ""); // clear progress line
+    if is_tty {
+        eprint!("\r{: <60}\r", ""); // clear progress line
+    }
 
     // Preserve original order
     let remaining_set: HashSet<&str> = remaining.iter().map(|s| s.as_str()).collect();
@@ -2744,7 +2773,7 @@ fn build_temp_nar_path() -> PathBuf {
 /// Generate a random token secret using cryptographically secure RNG.
 fn generate_token_secret() -> String {
     use base64::Engine;
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
