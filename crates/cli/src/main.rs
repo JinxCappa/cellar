@@ -2794,13 +2794,20 @@ fn hash_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use httpmock::Method::GET;
+    use httpmock::MockServer;
     use std::ffi::OsString;
     use std::future::Future;
+    use std::net::TcpListener;
     use std::sync::OnceLock;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn can_bind_localhost() -> bool {
+        TcpListener::bind("127.0.0.1:0").is_ok()
+    }
 
     async fn with_env_lock<F, Fut, T>(action: F) -> T
     where
@@ -3043,6 +3050,92 @@ mod tests {
             assert!(resolve_flake_store_paths("flake", &[]).await.is_err());
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn preflight_checks_authenticated_cellar_before_upstream() {
+        if !can_bind_localhost() {
+            eprintln!("Skipping httpmock test: cannot bind to localhost");
+            return;
+        }
+
+        let cellar = MockServer::start_async().await;
+        let upstream = MockServer::start_async().await;
+        let output_hash = "cg0md9aw7q8x1diphc5a92b5rby0hrkz";
+        let dependency_hash = "hps7pxvcgq32x46yx5a2nx53js5j41vb";
+
+        let cellar_output = cellar
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path(format!("/{output_hash}.narinfo"))
+                    .header("authorization", "Bearer secret-token");
+                then.status(200).body(format!(
+                    "StorePath: /nix/store/{output_hash}-netbird-client-0.74.6\n\
+                     URL: nar/{output_hash}.nar\n\
+                     Compression: none\n\
+                     FileHash: sha256-LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564=\n\
+                     FileSize: 100\n\
+                     NarHash: sha256-LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564=\n\
+                     NarSize: 100\n\
+                     References: {dependency_hash}-xgcc-15.2.0-libgcc\n"
+                ));
+            })
+            .await;
+        let upstream_output = upstream
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/{output_hash}.narinfo"));
+                then.status(200);
+            })
+            .await;
+        let upstream_dependency = upstream
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/{dependency_hash}.narinfo"));
+                then.status(200).body(format!(
+                    "StorePath: /nix/store/{dependency_hash}-xgcc-15.2.0-libgcc\n\
+                     URL: nar/0rwh5vmjc4gd0n8k7ss9xacs3k8g9n933fby0xa3xr4wl9k8x1ib.nar.xz\n\
+                     Compression: xz\n\
+                     FileHash: sha256:0rwh5vmjc4gd0n8k7ss9xacs3k8g9n933fby0xa3xr4wl9k8x1ib\n\
+                     FileSize: 72780\n\
+                     NarHash: sha256:09myb8jiscr644s4ypsavqs4jlzzcj4vyvvfr1ja2kn2mi106s5v\n\
+                     NarSize: 197672\n\
+                     References:\x20\n"
+                ));
+            })
+            .await;
+
+        let profile = CacheProfile {
+            url: cellar.base_url(),
+            token: "secret-token".to_string(),
+            cache_id: None,
+            cache_name: Some("test-cache".to_string()),
+            public_base_url: None,
+            public_key: None,
+        };
+        let output_path = format!("/nix/store/{output_hash}-netbird-client-0.74.6");
+        let result = try_preflight_closure_check(
+            &[output_path],
+            &profile,
+            &[upstream.base_url()],
+            false,
+            false,
+        )
+        .await;
+
+        match result {
+            PreflightResult::NothingToPush {
+                total,
+                on_cellar,
+                on_upstream,
+            } => {
+                assert_eq!(total, 2);
+                assert_eq!(on_cellar, 1);
+                assert_eq!(on_upstream, 1);
+            }
+            PreflightResult::Inconclusive => panic!("preflight should resolve the remote closure"),
+        }
+        cellar_output.assert_calls_async(1).await;
+        upstream_output.assert_calls_async(0).await;
+        upstream_dependency.assert_calls_async(1).await;
     }
 
     #[cfg(unix)]

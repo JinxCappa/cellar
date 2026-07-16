@@ -141,8 +141,9 @@ impl NarInfo {
             }
 
             let (key, value) = line
-                .split_once(": ")
+                .split_once(':')
                 .ok_or_else(|| crate::Error::NarInfoParse(format!("invalid line: {line}")))?;
+            let value = value.strip_prefix(' ').unwrap_or(value);
 
             match key {
                 "StorePath" => store_path = Some(StorePath::parse(value)?),
@@ -343,6 +344,25 @@ References: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-dep
         assert_eq!(parsed.file_hash, nar_hash);
         assert_eq!(parsed.nar_hash, nar_hash);
         assert_eq!(parsed.references.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_narinfo_with_empty_references() {
+        let text = "\
+StorePath: /nix/store/hps7pxvcgq32x46yx5a2nx53js5j41vb-xgcc-15.2.0-libgcc
+URL: nar/0rwh5vmjc4gd0n8k7ss9xacs3k8g9n933fby0xa3xr4wl9k8x1ib.nar.xz
+Compression: xz
+FileHash: sha256:0rwh5vmjc4gd0n8k7ss9xacs3k8g9n933fby0xa3xr4wl9k8x1ib
+FileSize: 72780
+NarHash: sha256:09myb8jiscr644s4ypsavqs4jlzzcj4vyvvfr1ja2kn2mi106s5v
+NarSize: 197672
+References:\x20
+Deriver: 5qvawd6v2mal36inz9x9lm2mn63c68a7-xgcc-15.2.0.drv
+";
+
+        let parsed = NarInfo::parse(text).unwrap();
+
+        assert!(parsed.references.is_empty());
     }
 
     #[test]
