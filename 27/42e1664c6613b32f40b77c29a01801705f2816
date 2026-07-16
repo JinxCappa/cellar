@@ -1,0 +1,25 @@
+crates/server/tests/postgres_tests.rs
+  s_65e08a9f39d5ff::t_399a110cfbea56 61,390
+crates/server/tests/metadata_tests.rs
+  s_65e08a9f39d5ff::t_399a110cfbea56 34,430
+crates/server/src/handlers/nix.rs
+  s_65e08a9f39d5ff::t_b8c80a767249bd 363
+crates/server/tests/storage_sweep_tests.rs
+  s_65e08a9f39d5ff::t_399a110cfbea56 250,274,370,400,578,615,722,807,833
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2742e1664c6613b32f40b77c29a01801705f2816",
+  "prompts": {},
+  "sessions": {
+    "s_65e08a9f39d5ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6b43-fb0f-79a2-a953-dd4d508328db",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JinxCappa <git@jinxcappa.dev>"
+    }
+  }
+}
