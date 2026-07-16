@@ -1,0 +1,26 @@
+crates/core/src/narinfo.rs
+  s_65e08a9f39d5ff::t_ce761328e6a8ba 359
+  s_65e08a9f39d5ff::t_fe7353040cc5fa 144,146,349-358,360-365
+  s_65e08a9f39d5ff::t_cd370d7bb2ba51 366-367
+crates/cli/src/main.rs
+  s_65e08a9f39d5ff::t_6b9ed9d2d8d432 2797-2798,2801,2808-2811,3055-3085,3087-3091,3093-3135,3139
+  s_65e08a9f39d5ff::t_bb0e9b08105d1f 3086,3092
+  s_65e08a9f39d5ff::t_94fe7f6c58f9c1 3136-3138
+  s_65e08a9f39d5ff::t_46a473ebcb9b9b 3140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "71e3ed439ba051d5d4396dd938eb7fcbad20e1b8",
+  "prompts": {},
+  "sessions": {
+    "s_65e08a9f39d5ff": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f6b43-fb0f-79a2-a953-dd4d508328db",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JinxCappa <git@jinxcappa.dev>"
+    }
+  }
+}
