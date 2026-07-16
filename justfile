@@ -443,8 +443,7 @@ release version:
     # 5. Create tag
     git tag -s "v${VERSION}" -m "v${VERSION}"
 
-    # 6. Push commit and tag
-    git push origin main
-    git push origin "v${VERSION}"
+    # 6. Push commit and tag atomically so CI can gate the tagged release
+    git push --atomic origin main "v${VERSION}"
 
     echo "Released v${VERSION} successfully!"
