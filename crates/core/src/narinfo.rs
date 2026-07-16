@@ -148,13 +148,13 @@ impl NarInfo {
                 "StorePath" => store_path = Some(StorePath::parse(value)?),
                 "URL" => url = Some(value.to_string()),
                 "Compression" => compression = Compression::parse(value)?,
-                "FileHash" => file_hash = Some(NarHash::from_sri(value)?),
+                "FileHash" => file_hash = Some(NarHash::parse(value)?),
                 "FileSize" => {
                     file_size = Some(value.parse().map_err(|e| {
                         crate::Error::NarInfoParse(format!("invalid FileSize: {e}"))
                     })?)
                 }
-                "NarHash" => nar_hash = Some(NarHash::from_sri(value)?),
+                "NarHash" => nar_hash = Some(NarHash::parse(value)?),
                 "NarSize" => {
                     nar_size =
                         Some(value.parse().map_err(|e| {
@@ -321,6 +321,28 @@ mod tests {
 
         assert_eq!(narinfo.store_path, parsed.store_path);
         assert_eq!(narinfo.nar_size, parsed.nar_size);
+    }
+
+    #[test]
+    fn test_parse_narinfo_with_traditional_nix_hashes() {
+        let nar_hash =
+            NarHash::from_sri("sha256-LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564=").unwrap();
+        let text = "\
+StorePath: /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-test
+URL: nar/abc.nar.xz
+Compression: xz
+FileHash: sha256:1bp7cri8hplaz6hbz0v4f0nl44rl84q1sg25kgwqzipzd1mv89ic
+FileSize: 90
+NarHash: sha256:1bp7cri8hplaz6hbz0v4f0nl44rl84q1sg25kgwqzipzd1mv89ic
+NarSize: 100
+References: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-dep
+";
+
+        let parsed = NarInfo::parse(text).unwrap();
+
+        assert_eq!(parsed.file_hash, nar_hash);
+        assert_eq!(parsed.nar_hash, nar_hash);
+        assert_eq!(parsed.references.len(), 1);
     }
 
     #[test]

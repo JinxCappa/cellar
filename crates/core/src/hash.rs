@@ -133,6 +133,30 @@ impl NarHash {
         Ok(Self(ContentHash::from_base64(b64)?))
     }
 
+    /// Parse a SHA-256 hash as either SRI (`sha256-<base64>`) or the
+    /// traditional Nix format (`sha256:<nix-base32>`).
+    pub fn parse(s: &str) -> crate::Result<Self> {
+        if s.starts_with("sha256-") {
+            return Self::from_sri(s);
+        }
+
+        let encoded = s.strip_prefix("sha256:").ok_or_else(|| {
+            crate::Error::InvalidHash(format!("expected sha256- or sha256: prefix, got: {s}"))
+        })?;
+        let bytes = nix_base32::from_nix_base32(encoded)
+            .ok_or_else(|| crate::Error::InvalidHash(format!("invalid Nix base32 hash: {s}")))?;
+        if bytes.len() != 32 {
+            return Err(crate::Error::InvalidHash(format!(
+                "expected 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        Ok(Self(ContentHash::from_bytes(hash)))
+    }
+
     /// Encode as SRI format.
     pub fn to_sri(&self) -> String {
         format!("sha256-{}", self.0.to_base64())
@@ -210,5 +234,16 @@ mod tests {
         assert!(sri.starts_with("sha256-"));
         let parsed = NarHash::from_sri(&sri).unwrap();
         assert_eq!(nar_hash, parsed);
+    }
+
+    #[test]
+    fn test_parse_nar_hash_in_traditional_nix_format() {
+        let sri = "sha256-LCa0a2j/xo/5m0U8HTBBNBNCLXBkg7+g+YpeiGJm564=";
+        let nix32 = "sha256:1bp7cri8hplaz6hbz0v4f0nl44rl84q1sg25kgwqzipzd1mv89ic";
+
+        assert_eq!(
+            NarHash::parse(nix32).unwrap(),
+            NarHash::from_sri(sri).unwrap()
+        );
     }
 }
