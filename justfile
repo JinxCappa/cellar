@@ -436,9 +436,9 @@ release version:
     # 3. Update CHANGELOG.md with git-cliff (skip alpha/beta/rc tags)
     git-cliff --config keepachangelog --tag "v${VERSION}" --output CHANGELOG.md --ignore-tags ".*-.*"
 
-    # 4. Commit changes
+    # 4. Commit changes with a verified signature
     git add Cargo.toml Cargo.lock CHANGELOG.md
-    git commit -m "chore: prepare for v${VERSION}"
+    git commit -S -m "chore: prepare for v${VERSION}"
 
     # 5. Create tag
     git tag -s "v${VERSION}" -m "v${VERSION}"
