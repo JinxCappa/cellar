@@ -360,7 +360,7 @@ pub async fn get_nar(
                     domain_id,
                     &chunk_hash[..2],
                     &chunk_hash[2..4],
-                    &chunk_hash
+                    chunk_hash
                 );
                 match storage.get(&key).await {
                     Ok(data) => Ok(data),

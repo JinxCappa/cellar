@@ -247,7 +247,7 @@ async fn test_storage_sweep_protects_active_uploads() {
             domain_id,
             &chunk_hash[..2],
             &chunk_hash[2..4],
-            &chunk_hash
+            chunk_hash
         )),
         refcount: 0, // Stale!
         created_at: old_time,
@@ -271,7 +271,7 @@ async fn test_storage_sweep_protects_active_uploads() {
     // Create an active upload session that expects this chunk
     let upload_id = Uuid::new_v4();
     let sp_hash = store_path_hash("test-upload");
-    let store_path = format!("/nix/store/{}-test", &sp_hash);
+    let store_path = format!("/nix/store/{}-test", sp_hash);
     let now = OffsetDateTime::now_utc();
 
     let session = UploadSessionRow {
@@ -367,7 +367,7 @@ async fn test_storage_sweep_checks_expected_chunks() {
             domain_id,
             &chunk_hash[..2],
             &chunk_hash[2..4],
-            &chunk_hash
+            chunk_hash
         )),
         refcount: 0,
         created_at: old_time,
@@ -397,7 +397,7 @@ async fn test_storage_sweep_checks_expected_chunks() {
         upload_id,
         cache_id: None,
         domain_id,
-        store_path: format!("/nix/store/{}-expected", &sp_hash),
+        store_path: format!("/nix/store/{}-expected", sp_hash),
         store_path_hash: sp_hash,
         nar_size: 500,
         nar_hash: format!("sha256:{}", test_hash("expected-nar")),
@@ -575,7 +575,7 @@ async fn test_storage_sweep_created_during_active_session() {
         upload_id,
         cache_id: None,
         domain_id,
-        store_path: format!("/nix/store/{}-active", &sp_hash),
+        store_path: format!("/nix/store/{}-active", sp_hash),
         store_path_hash: sp_hash,
         nar_size: 1000,
         nar_hash: format!("sha256:{}", test_hash("active-nar")),
@@ -612,7 +612,7 @@ async fn test_storage_sweep_created_during_active_session() {
             domain_id,
             &chunk_hash[..2],
             &chunk_hash[2..4],
-            &chunk_hash
+            chunk_hash
         )),
         refcount: 0,
         created_at: chunk_created,
@@ -719,7 +719,7 @@ async fn test_storage_sweep_keeps_manifests_with_metadata() {
             domain_id,
             &manifest_hash[..2],
             &manifest_hash[2..4],
-            &manifest_hash
+            manifest_hash
         )),
         refcount: 1,
         created_at: now,
@@ -804,7 +804,7 @@ async fn test_storage_sweep_with_multiple_chunks() {
             domain_id,
             &chunk1_hash[..2],
             &chunk1_hash[2..4],
-            &chunk1_hash
+            chunk1_hash
         )),
         refcount: 5, // Active!
         created_at: OffsetDateTime::now_utc() - time::Duration::days(30),
@@ -830,7 +830,7 @@ async fn test_storage_sweep_with_multiple_chunks() {
             domain_id,
             &chunk2_hash[..2],
             &chunk2_hash[2..4],
-            &chunk2_hash
+            chunk2_hash
         )),
         refcount: 0,
         created_at: OffsetDateTime::now_utc(), // Recent

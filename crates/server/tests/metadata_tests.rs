@@ -31,7 +31,7 @@ async fn test_upload_session_lifecycle() {
 
     let upload_id = Uuid::new_v4();
     let sp_hash = store_path_hash("test");
-    let store_path = format!("/nix/store/{}-test-package", &sp_hash);
+    let store_path = format!("/nix/store/{}-test-package", sp_hash);
     let now = OffsetDateTime::now_utc();
     let domain_id = default_domain_id();
 
@@ -427,7 +427,7 @@ async fn test_store_path_visibility() {
         store_path_hash: path_hash.clone(),
         cache_id: None,
         domain_id,
-        store_path: format!("/nix/store/{}-test", &path_hash),
+        store_path: format!("/nix/store/{}-test", path_hash),
         nar_hash: test_hash("vis-nar"),
         nar_size: 1000,
         manifest_hash: manifest_hash.clone(),
