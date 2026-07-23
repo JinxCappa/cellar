@@ -89,9 +89,20 @@ impl StorePath {
             ));
         }
 
-        // Validate name characters (alphanumeric, -, _, ., +)
+        // Validate the store name using Nix's allowed character set.
         for c in name.chars() {
-            if !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '+') {
+            if !matches!(
+                c,
+                'a'..='z'
+                    | 'A'..='Z'
+                    | '0'..='9'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '_'
+                    | '?'
+                    | '='
+            ) {
                 return Err(crate::Error::InvalidStorePath(format!(
                     "invalid character in name: {c}"
                 )));
@@ -164,6 +175,15 @@ mod tests {
         let parsed = StorePath::parse(path).unwrap();
         assert_eq!(parsed.hash().as_str(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(parsed.name(), "foo");
+        assert_eq!(parsed.to_path_string(), path);
+    }
+
+    #[test]
+    fn test_parse_valid_store_path_name_special_characters() {
+        let path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-webkitgtk-2.52.5+abi=6.0_foo?bar";
+        let parsed = StorePath::parse(path).unwrap();
+
+        assert_eq!(parsed.name(), "webkitgtk-2.52.5+abi=6.0_foo?bar");
         assert_eq!(parsed.to_path_string(), path);
     }
 
