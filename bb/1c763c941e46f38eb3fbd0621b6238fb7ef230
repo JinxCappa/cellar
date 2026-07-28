@@ -1,0 +1,21 @@
+crates/cli/src/main.rs
+  s_fe8cc210514548::t_aee0fed7cf221c 3058-3093
+  s_fe8cc210514548::t_7debfb4dc00d24 1988-1993,1997-2002,2004-2010,2015,2017-2022,2032
+  s_fe8cc210514548::t_505f7c30262142 1994-1996,2003
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "bb1c763c941e46f38eb3fbd0621b6238fb7ef230",
+  "prompts": {},
+  "sessions": {
+    "s_fe8cc210514548": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fab13-1249-7e81-98fc-ef64d0c70952",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JinxCappa <git@jinxcappa.dev>"
+    }
+  }
+}
