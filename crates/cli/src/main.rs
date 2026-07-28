@@ -1985,14 +1985,41 @@ async fn expand_to_closure(paths: &[String]) -> Result<Vec<String>> {
     Ok(closure)
 }
 
-/// Evaluate a flake reference to get output paths without building.
+/// Build the Nix expression used to resolve the outputs selected by an installable.
 ///
-/// Runs `nix derivation show` which only evaluates the derivation (no download/build).
+/// Nix uses `meta.outputsToInstall` when present and otherwise installs every
+/// declared output. An explicit output selector (`^out,dev` or `^*`) overrides
+/// that default.
+fn selected_output_paths_expr(flake: &str) -> String {
+    let outputs_expr = match flake.rsplit_once('^').map(|(_, outputs)| outputs) {
+        None => "drv.meta.outputsToInstall or drv.outputs".to_string(),
+        Some("*") => "drv.outputs".to_string(),
+        Some(outputs) => {
+            let names = outputs
+                .split(',')
+                .map(|name| serde_json::to_string(name).expect("output name is serializable"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("[ {names} ]")
+        }
+    };
+
+    format!("drv: map (output: drv.${{output}}.outPath) ({outputs_expr})")
+}
+
+/// Evaluate a flake reference to get its selected output paths without building.
+///
 /// Returns `None` on any failure (IFD, eval error, old Nix) so the caller can
 /// fall back to the normal build path.
 async fn evaluate_flake_output_paths(flake: &str, nix_args: &[String]) -> Option<Vec<String>> {
+    let apply_expr = selected_output_paths_expr(flake);
     let mut cmd = Command::new("nix");
-    cmd.arg("derivation").arg("show").arg(flake).args(nix_args);
+    cmd.arg("eval")
+        .arg("--json")
+        .arg(flake)
+        .arg("--apply")
+        .arg(apply_expr)
+        .args(nix_args);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -2002,31 +2029,7 @@ async fn evaluate_flake_output_paths(flake: &str, nix_args: &[String]) -> Option
         return None;
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    let obj = json.as_object()?;
-
-    // Nix 2.32+ (v3/v4) wraps derivations under a "derivations" key;
-    // older formats put drv paths directly at the top level.
-    let drvs = if let Some(inner) = obj.get("derivations").and_then(|v| v.as_object()) {
-        inner
-    } else {
-        obj
-    };
-
-    let mut paths = Vec::new();
-    for (_drv_path, drv_info) in drvs {
-        let outputs = drv_info.get("outputs")?.as_object()?;
-        for (_name, output_info) in outputs {
-            if let Some(path) = output_info.get("path").and_then(|p| p.as_str()) {
-                // Nix 2.32+ omits the /nix/store/ prefix
-                if path.starts_with("/nix/store/") {
-                    paths.push(path.to_string());
-                } else {
-                    paths.push(format!("/nix/store/{path}"));
-                }
-            }
-        }
-    }
+    let mut paths: Vec<String> = serde_json::from_slice(&output.stdout).ok()?;
 
     paths.sort();
     paths.dedup();
@@ -3048,6 +3051,42 @@ mod tests {
             let _guard = PathGuard::prepend(temp.path());
 
             assert!(resolve_flake_store_paths("flake", &[]).await.is_err());
+        })
+        .await;
+    }
+
+    #[test]
+    fn selected_output_paths_expr_matches_nix_output_selection() {
+        assert_eq!(
+            selected_output_paths_expr(".#package"),
+            "drv: map (output: drv.${output}.outPath) (drv.meta.outputsToInstall or drv.outputs)"
+        );
+        assert_eq!(
+            selected_output_paths_expr(".#package^*"),
+            "drv: map (output: drv.${output}.outPath) (drv.outputs)"
+        );
+        assert_eq!(
+            selected_output_paths_expr(".#package^dev,out"),
+            "drv: map (output: drv.${output}.outPath) ([ \"dev\" \"out\" ])"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn evaluate_flake_output_paths_uses_selected_outputs() {
+        with_env_lock(|| async {
+            let temp = tempdir().unwrap();
+            write_script(
+                temp.path(),
+                "nix",
+                "#!/bin/sh\ncase \"$*\" in\n  *outputsToInstall*) printf '%s\\n' '[\"/nix/store/selected\",\"/nix/store/selected\"]' ;;\n  *) exit 1 ;;\nesac\n",
+            );
+            let _guard = PathGuard::prepend(temp.path());
+
+            let paths = evaluate_flake_output_paths(".#package", &[])
+                .await
+                .unwrap();
+            assert_eq!(paths, vec!["/nix/store/selected".to_string()]);
         })
         .await;
     }
